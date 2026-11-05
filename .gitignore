@@ -11,12 +11,12 @@ dart/**/.dart_tool/
 
 # Flutter build output
 dart/**/build/
-dart/raptor_flutter/android/.cxx/
-dart/raptor_flutter/example/android/.gradle/
-dart/raptor_flutter/example/android/local.properties
-dart/raptor_flutter/example/android/app/debug/
-dart/raptor_flutter/example/android/app/profile/
-dart/raptor_flutter/example/android/app/release/
+dart/dyl_flutter/android/.cxx/
+dart/dyl_flutter/example/android/.gradle/
+dart/dyl_flutter/example/android/local.properties
+dart/dyl_flutter/example/android/app/debug/
+dart/dyl_flutter/example/android/app/profile/
+dart/dyl_flutter/example/android/app/release/
 
 # Cross-compiled cdylib, dropped in by scripts/build_android_lib.sh (~28 MB).
-dart/raptor_flutter/example/android/app/src/main/jniLibs/
+dart/dyl_flutter/example/android/app/src/main/jniLibs/
