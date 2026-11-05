@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 107,
+  "op": "set_mute",
+  "muted": true
+}

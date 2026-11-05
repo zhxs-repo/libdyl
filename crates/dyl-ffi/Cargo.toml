@@ -1,0 +1,36 @@
+[package]
+name = "dyl-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl C ABI adapter: thin extern C exports over dyl-engine"
+
+[lib]
+name = "dyl"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-engine = { path = "../dyl-engine" }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Android-only: routes tracing output to logcat. Without it the player is
+# completely silent on device (no RUST_LOG, stdout discarded by the app sandbox).
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+log = "0.4"
+
+[[example]]
+name = "cli_player"
+path = "examples/cli_player.rs"
+
+[dev-dependencies]
+dyl-danmaku = { path = "../dyl-danmaku" }
+dyl-render = { path = "../dyl-render" }
+dyl-subtitle = { path = "../dyl-subtitle" }
+wgpu = { workspace = true }
+winit = { workspace = true }
+raw-window-handle = "0.6"

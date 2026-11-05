@@ -1,13 +1,15 @@
 [workspace]
 members = [
-    "crates/raptor-core",
-    "crates/raptor-ffmpeg",
-    "crates/raptor-render",
-    "crates/raptor-audio",
-    "crates/raptor-danmaku",
-    "crates/raptor-subtitle",
-    "crates/raptor-pipeline",
-    "crates/raptor-ffi",
+    "crates/dyl-core",
+    "crates/dyl-ffmpeg",
+    "crates/dyl-render",
+    "crates/dyl-audio",
+    "crates/dyl-danmaku",
+    "crates/dyl-subtitle",
+    "crates/dyl-pipeline",
+    "crates/dyl-engine",
+    "crates/dyl-ffi",
+    "crates/dyl-player",
 ]
 resolver = "2"
 
@@ -18,14 +20,16 @@ ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", 
 # left wgpu-core building in no_std mode -- fine for a Windows check, broken for
 # the Android Vulkan/GLES backends.
 #
-# No `dx12` on purpose: enabling it pulls in wgpu-hal's D3D12 suballocator, which
-# does not compile against the `windows` crate versions in the lockfile
-# (gpu-allocator 0.28 wants a newer windows-core than wgpu-hal 29.0.3 allows).
-# The Windows CLI player therefore has no GPU backend; enabling dx12 needs a
-# windows/gpu-allocator version bump first. Irrelevant for Android.
-wgpu = { version = "29", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "gles", "wgsl"] }
-cpal = "0.15"
-tokio = { version = "1", features = ["sync", "rt"] }
+# `dx12` requires every crate exposing Windows D3D types to agree on one `windows`
+# version. gpu-allocator 0.28 accepts `>=0.53, <=0.62`, so the resolver can pair it
+# with cpal's old 0.54 pin while wgpu-hal uses 0.62 -- and ID3D12Heap from two
+# `windows` crates does not satisfy the same `Param` bound. cpal >= 0.18 depends on
+# `windows ^0.62`, which keeps that edge unified; do not downgrade cpal below 0.18
+# without re-checking `cargo tree -i windows`.
+wgpu = { version = "29", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "gles", "wgsl", "dx12"] }
+# 0.18 (not 0.15) because `dx12` needs one `windows` version across the graph; see
+# the wgpu feature note above. API delta: config passed by value, `DeviceTrait::description`.
+cpal = "0.18"
 crossbeam-channel = "0.5"
 
 # Common
@@ -35,9 +39,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# android-native-activity is only needed by the desktop WgpuRenderer's winit
-# event loop; on Android the surface comes from Flutter via ExternalRenderer.
-winit = { version = "0.29", features = ["android-native-activity"] }
+# winit is shell-only (dyl-player + cli_player). android-native-activity is
+# still enabled because those examples must compile for Android; the plugin
+# itself gets its surface from Flutter via ExternalRenderer.
+# (Still named `android-native-activity` on winit 0.30 — the rename to
+# `android-activity` happens in 0.31, which is still beta.)
+winit = { version = "0.30", features = ["android-native-activity"] }
+# egui 0.35 is the last line matching wgpu 29; 0.36 moves to wgpu 30.
+# `default-features = false` is mandatory: egui-wgpu's defaults include
+# `wgpu/default`, which would silently turn dx12/dx11/webgl back on.
+egui = { version = "~0.35", default-features = false, features = ["default_fonts"] }
+egui-wgpu = { version = "~0.35", default-features = false }
+egui-winit = { version = "~0.35", default-features = false, features = ["clipboard", "links"] }
 pollster = "0.4"
 thiserror = "1"
 aho-corasick = "1.1"

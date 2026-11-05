@@ -1,0 +1,19 @@
+[package]
+name = "dyl-pipeline"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl pipeline: demux/decode/render/audio threads + AV sync"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-ffmpeg = { path = "../dyl-ffmpeg" }
+dyl-render = { path = "../dyl-render" }
+dyl-audio = { path = "../dyl-audio" }
+dyl-subtitle = { path = "../dyl-subtitle" }
+dyl-danmaku = { path = "../dyl-danmaku" }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+ffmpeg-next = { workspace = true }

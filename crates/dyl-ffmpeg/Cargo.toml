@@ -1,0 +1,16 @@
+[package]
+name = "dyl-ffmpeg"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl FFmpeg adapter: Demuxer/Decoder traits + FfmpegXxx impls"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+ffmpeg-next = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# 例子用：RUST_LOG=info 才能看到 hwaccel 的选路与"悄悄落回软解"的 warn
+tracing-subscriber = { workspace = true }

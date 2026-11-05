@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "kind": "wayland_surface",
+  "surface": "0x7f8a0000",
+  "display": "0x7f8b0000",
+  "width": 1280,
+  "height": 720,
+  "scale_factor": 1.0
+}

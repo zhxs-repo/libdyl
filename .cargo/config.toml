@@ -7,21 +7,21 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # API level 26 (Android 8.0) — libaaudio.so only exists from API 26 on.
 #
 # Build with cargo-ndk (recommended; auto-places the .so into jniLibs):
-#   cargo ndk -t arm64-v8a -o ./dart/raptor_flutter/example/android/app/src/main/jniLibs build --release -p raptor-ffi
+#   cargo ndk -t arm64-v8a -o ./dart/dyl_flutter/example/android/app/src/main/jniLibs build --release -p dyl-ffi
 #
-# Or manually (then copy target\aarch64-linux-android\release\libraptor_ffi.so
+# Or manually (then copy target\aarch64-linux-android\release\libdyl.so
 # into android/app/src/main/jniLibs/arm64-v8a/ yourself):
-#   cargo build --target aarch64-linux-android --release -p raptor-ffi
+#   cargo build --target aarch64-linux-android --release -p dyl-ffi
 
 [target.aarch64-linux-android]
 linker = "D:\\Devs\\android_sdk\\ndk\\28.2.13676358\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\aarch64-linux-android26-clang.cmd"
 
 [env]
 # FFmpeg for Android: headers + static libs produced by scripts/build_ffmpeg_android.sh.
-# raptor-ffmpeg/build.rs picks this up (arch-specific key) and forwards it to
+# dyl-ffmpeg/build.rs picks this up (arch-specific key) and forwards it to
 # ffmpeg-sys-next as FFMPEG_DIR. Keep it pointing at the `arm64` tree; add more
 # ABIs as sibling directories with their own key.
-FFMPEG_DIR_aarch64_linux_android = "D:\\Devs\\github\\dyl-player\\raptor-player\\third_party\\ffmpeg-android\\arm64"
+FFMPEG_DIR_aarch64_linux_android = "D:\\Devs\\github\\dyl-player\\libdyl\\third_party\\ffmpeg-android\\arm64"
 
 # bindgen runs on the host but must parse FFmpeg headers in the *target's* ABI
 # context (type sizes differ between Win64 and aarch64-android). The

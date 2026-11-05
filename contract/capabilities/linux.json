@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "abi": { "major": 0, "minor": 6, "patch": 0 },
+  "platform": "linux",
+  "gpu_backends": ["vulkan", "gles"],
+  "protocols": ["http", "https"],
+  "presentation": {
+    "external_surface": true,
+    "texture_sharing": false,
+    "attach_before_load": true,
+    "embedded": true,
+    "detached": true,
+    "surface_kinds": ["x11_window"]
+  },
+  "features": {
+    "video_codecs": ["h264", "h265", "av1"],
+    "audio_codecs": ["aac", "flac"],
+    "subtitle_formats": ["srt", "ass", "ssa"],
+    "embedded_ass_styling": true,
+    "track_switching": true,
+    "hw_decode": false,
+    "danmaku_formats": ["bilibili_xml"],
+    "danmaku_xml_entities": true,
+    "seek_modes": ["exact", "keyframe"],
+    "overlay_in_core": true
+  },
+  "limits": { "max_texture_dimension_2d": 2048 }
+}

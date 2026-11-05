@@ -1,0 +1,26 @@
+[
+  {
+    "schema": 1,
+    "seq": 1,
+    "type": "seek_completed",
+    "data": {
+      "request_id": 115,
+      "from_ms": 12340,
+      "to_ms": 90000,
+      "actual_ms": 90016,
+      "mode": "exact"
+    }
+  },
+  {
+    "schema": 1,
+    "seq": 2,
+    "type": "command_completed",
+    "data": { "request_id": 115, "op": "seek", "status": "ok" }
+  },
+  {
+    "schema": 1,
+    "seq": 3,
+    "type": "command_completed",
+    "data": { "request_id": 104, "op": "seek", "status": "superseded" }
+  }
+]

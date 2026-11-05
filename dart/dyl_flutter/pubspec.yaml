@@ -1,0 +1,32 @@
+name: dyl_flutter
+description: >
+  Flutter plugin for Dyl Player — Android SurfaceView integration with
+  ANativeWindow FFI binding, lifecycle management, and video rendering widget.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dyl:
+    path: ../dyl
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.dylplayer.dyl_flutter
+        pluginClass: DylFlutterPlugin
+      ios:
+        pluginClass: DylFlutterPlugin
+      windows:
+        pluginClass: DylFlutterPlugin

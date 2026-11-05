@@ -1,0 +1,14 @@
+[package]
+name = "dyl-render"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl video renderer: wgpu soft-decode rendering + WGSL shaders"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-ffmpeg = { path = "../dyl-ffmpeg" }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+raw-window-handle = "0.6"

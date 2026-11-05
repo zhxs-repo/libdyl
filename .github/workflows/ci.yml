@@ -1,0 +1,154 @@
+name: ci
+
+# 门禁顺序与 scripts/run_gates.sh 一致：fmt → clippy → 全量测试 → smoke →
+# e2e → seek storm。soak（长播）单独成 job，只在 main 或手动触发时跑，
+# 默认 120s，手动触发可传 7200 做 2 小时验收。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: "长播验收时长（秒）"
+        required: false
+        default: "120"
+      soak_asset_seconds:
+        description: "长播素材总时长（秒）"
+        required: false
+        default: "7200"
+
+env:
+  CARGO_TERM_COLOR: always
+  # 本地曾出现增量编译卡死；CI 每次都是新 checkout，关掉换来可复现
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: gates / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ffmpeg_url: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz
+          - os: windows-latest
+            # 8.1 被 n9 + 6 个月策略锁住，用固定版本而不是 "release"
+            ffmpeg_url: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-full_build-shared.7z
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install FFmpeg 8.1 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libasound2-dev: cpal；clang/libclang-dev: ffmpeg-sys-next 的 bindgen
+          # mesa-vulkan-drivers: 无 GPU 的 runner 上给 wgpu 一个 lavapipe 适配器
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev clang libclang-dev \
+            libvulkan1 mesa-vulkan-drivers
+          curl -fsSL "${{ matrix.ffmpeg_url }}" -o "$RUNNER_TEMP/ffmpeg.tar.xz"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "FFMPEG_DIR=$RUNNER_TEMP/ffmpeg" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/ffmpeg/lib" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+
+      - name: Install FFmpeg 8.1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ matrix.ffmpeg_url }}" -OutFile "$env:RUNNER_TEMP\ffmpeg.7z"
+          & 7z x "$env:RUNNER_TEMP\ffmpeg.7z" "-o$env:RUNNER_TEMP\ffmpeg" -y | Out-Null
+          $root = (Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1).FullName
+          "FFMPEG_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # 真实素材不入库：用同一组参数生成 5s / 640x360 / H.264+AAC 的验收素材，
+      # e2e_playback 与 seek_storm 的断言都基于它
+      - name: Generate test asset
+        run: |
+          ffmpeg -y -f lavfi -i testsrc2=duration=5:size=640x360:rate=30 \
+                 -f lavfi -i sine=frequency=440:duration=5 \
+                 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test_video.mp4
+
+      - name: Gates (fmt, clippy, tests, smoke, e2e, seek storm)
+        shell: bash
+        run: bash scripts/run_gates.sh
+
+  dart:
+    name: dart
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: dyl contract tests
+        working-directory: dart/dyl
+        run: |
+          dart pub get
+          dart test
+      - name: dyl_flutter analyze
+        working-directory: dart/dyl_flutter
+        run: |
+          flutter pub get
+          flutter analyze
+
+  soak:
+    name: soak
+    # 2 小时长播不适合每个 PR 都跑；main 与手动触发才执行
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install FFmpeg 8.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev clang libclang-dev
+          curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz \
+            -o "$RUNNER_TEMP/ffmpeg.tar.xz"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "FFMPEG_DIR=$RUNNER_TEMP/ffmpeg" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/ffmpeg/lib" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+
+      - name: Generate test asset
+        run: |
+          ffmpeg -y -f lavfi -i testsrc2=duration=5:size=640x360:rate=30 \
+                 -f lavfi -i sine=frequency=440:duration=5 \
+                 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test_video.mp4
+
+      - name: Generate soak asset
+        run: bash scripts/make_soak_asset.sh test_video.mp4 "${{ github.event.inputs.soak_asset_seconds || '7200' }}" long_2h.mp4
+
+      - name: Soak
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --example soak -p dyl-ffi -- \
+            long_2h.mp4 "${{ github.event.inputs.soak_seconds || '120' }}"

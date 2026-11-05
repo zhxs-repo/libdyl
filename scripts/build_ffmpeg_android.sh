@@ -32,7 +32,7 @@ SYSROOT="$LLVM/sysroot"
 HOST_BIN="$NDK/prebuilt/windows-x86_64/bin"
 
 SRC="${FFMPEG_SRC:-D:/Devs/tmp/ffmpeg-7.1.1}"
-PREFIX="${FFMPEG_PREFIX:-D:/Devs/github/dyl-player/raptor-player/third_party/ffmpeg-android/arm64}"
+PREFIX="${FFMPEG_PREFIX:-D:/Devs/github/dyl-player/libdyl/third_party/ffmpeg-android/arm64}"
 
 # Host compiler, used only by configure for its own C11 feature probes
 # (--disable-programs means no host binaries actually get built).
@@ -88,7 +88,7 @@ echo "==> Jobs     : $JOBS"
 
 cd "$SRC"
 
-# Static libs only: they get linked straight into libraptor_ffi.so, so the APK
+# Static libs only: they get linked straight into libdyl.so, so the APK
 # ships a single .so instead of six libav*.so files.
 #
 # --enable-pic is mandatory: the objects end up inside a shared object.
@@ -98,7 +98,7 @@ cd "$SRC"
 # back in r23 -- so the llvm binutils have to be named one by one.
 # --disable-autodetect keeps the dependency set at "libc only" (no zlib, no iconv,
 #   no TLS stack), which keeps the static link from dragging in more system libs.
-# --disable-encoders: raptor only demuxes and decodes (no encoder is referenced
+# --disable-encoders: dyl only demuxes and decodes (no encoder is referenced
 #   anywhere in crates/), and dropping the encoders removes a large chunk of
 #   libavcodec -- including the native Opus encoder that Android cannot load.
 ./configure \
@@ -139,7 +139,7 @@ patch_library_mak() {
     mak="$SRC/ffbuild/library.mak"
     [ -f "$mak" ] || { echo "error: $mak not found" >&2; exit 1; }
 
-    if grep -q 'raptor-android-rsp' "$mak"; then
+    if grep -q 'dyl-android-rsp' "$mak"; then
         echo "==> library.mak already patched"
         return 0
     fi
@@ -155,14 +155,14 @@ patch_library_mak() {
         /\$\(AR\) \$\(ARFLAGS\) \$\(AR_O\) \$\^/ && !done {
             print "\t$(file >$@.rsp,$^)"
             print "\t$(AR) $(ARFLAGS) $(AR_O) @$@.rsp"
-            print "\t$(RM) $@.rsp  # raptor-android-rsp"
+            print "\t$(RM) $@.rsp  # dyl-android-rsp"
             done = 1
             next
         }
         { print }
     ' "$mak" > "$mak.new"
 
-    if ! grep -q 'raptor-android-rsp' "$mak.new"; then
+    if ! grep -q 'dyl-android-rsp' "$mak.new"; then
         echo "error: failed to patch the archive rule in $mak" >&2
         rm -f "$mak.new"
         exit 1

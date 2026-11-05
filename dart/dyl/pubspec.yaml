@@ -1,0 +1,17 @@
+name: dyl
+description: >
+  Dart FFI bindings for Dyl Player — a cross-platform media player kernel
+  written in Rust. Provides DylClient API for playback control, subtitle
+  and danmaku overlay management.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  ffi: ^2.1.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.0.0

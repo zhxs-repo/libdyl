@@ -1,0 +1,18 @@
+[package]
+name = "dyl-danmaku"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl danmaku engine: DFM-inspired layout + wgpu rendering"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-render = { path = "../dyl-render" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+ab_glyph = "0.2"
+parking_lot = { workspace = true }
+aho-corasick = { workspace = true }
+regex = { workspace = true }

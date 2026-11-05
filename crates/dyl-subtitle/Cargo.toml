@@ -1,0 +1,18 @@
+[package]
+name = "dyl-subtitle"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl subtitle engine: ASS/SRT parsing + wgpu overlay rendering"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-render = { path = "../dyl-render" }
+wgpu = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+ab_glyph = "0.2"
+parking_lot = { workspace = true }
+fontdb = "0.24.0"
+
+[dev-dependencies]
+pollster = { workspace = true }

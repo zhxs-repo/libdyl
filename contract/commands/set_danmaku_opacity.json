@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 111,
+  "op": "set_danmaku_opacity",
+  "opacity": 80
+}

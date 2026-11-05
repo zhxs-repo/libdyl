@@ -1,0 +1,20 @@
+[
+  {
+    "schema": 1,
+    "seq": 1,
+    "type": "surface_attached",
+    "data": { "kind": "windows_hwnd", "width": 1280, "height": 720, "scale_factor": 1.5 }
+  },
+  {
+    "schema": 1,
+    "seq": 2,
+    "type": "surface_resized",
+    "data": { "width": 1600, "height": 900 }
+  },
+  {
+    "schema": 1,
+    "seq": 3,
+    "type": "surface_detached",
+    "data": { "kind": "windows_hwnd" }
+  }
+]

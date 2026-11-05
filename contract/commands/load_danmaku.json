@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 112,
+  "op": "load_danmaku",
+  "path": "D:\\danmaku.xml"
+}

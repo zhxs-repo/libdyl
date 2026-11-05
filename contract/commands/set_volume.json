@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 106,
+  "op": "set_volume",
+  "volume": 80
+}

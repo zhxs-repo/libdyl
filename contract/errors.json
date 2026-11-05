@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "errors": [
+    { "code_num": 0, "code": "ok", "constant": "DYL_OK" },
+    { "code_num": -1, "code": "invalid_argument", "constant": "DYL_ERR_INVALID_ARGUMENT" },
+    { "code_num": -2, "code": "invalid_state", "constant": "DYL_ERR_INVALID_STATE" },
+    { "code_num": -3, "code": "file_not_found", "constant": "DYL_ERR_FILE_NOT_FOUND" },
+    { "code_num": -4, "code": "demux", "constant": "DYL_ERR_DEMUX" },
+    { "code_num": -5, "code": "decode", "constant": "DYL_ERR_DECODE" },
+    { "code_num": -6, "code": "render", "constant": "DYL_ERR_RENDER" },
+    { "code_num": -7, "code": "audio", "constant": "DYL_ERR_AUDIO" },
+    { "code_num": -8, "code": "pipeline", "constant": "DYL_ERR_PIPELINE" },
+    { "code_num": -9, "code": "not_supported", "constant": "DYL_ERR_NOT_SUPPORTED" },
+    { "code_num": -10, "code": "surface", "constant": "DYL_ERR_SURFACE" },
+    { "code_num": -11, "code": "busy", "constant": "DYL_ERR_BUSY" },
+    { "code_num": -12, "code": "timeout", "constant": "DYL_ERR_TIMEOUT" },
+    { "code_num": -13, "code": "io", "constant": "DYL_ERR_IO" },
+    { "code_num": -14, "code": "cancelled", "constant": "DYL_ERR_CANCELLED" },
+    { "code_num": -99, "code": "internal", "constant": "DYL_ERR_INTERNAL" }
+  ]
+}

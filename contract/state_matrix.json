@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "states": ["idle", "loading", "ready", "playing", "paused", "ended", "stopped", "error"],
+  "notes": {
+    "accepted": "命令入队后成功；to 为落点，same 表示状态不变且不发 state_changed",
+    "to_array": "load_file 的 to 列出 loading 与最终状态 ready/error",
+    "rejected": "通过 command_completed(status=error) 异步拒绝，不是同步拒绝",
+    "select_track": "换轨是按新轨道组合重开管线，因此同样经过 loading；完成后重发 file_loaded（携带更新过的 media.tracks），客户端照旧重读快照",
+    "set_decode_mode": "ready/playing/paused 切解码方式是重开管线：经过 loading，完成后落回原状态，不重发 file_loaded，位置由内部 seek 保持；idle/ended/stopped/error 只持久化设置，在下一次打开或重开时生效"
+  },
+  "reject": {
+    "channel": "command_completed",
+    "status": "error",
+    "error": { "code": "invalid_state", "code_num": -2 }
+  },
+  "matrix": {
+    "load_file": {
+      "idle": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "loading": { "status": "accepted", "to": ["loading", "ready", "error"], "cancels_inflight_load": true },
+      "ready": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "playing": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "paused": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "ended": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "stopped": { "status": "accepted", "to": ["loading", "ready", "error"] },
+      "error": { "status": "accepted", "to": ["loading", "ready", "error"] }
+    },
+    "play": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "playing" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "playing" },
+      "ended": { "status": "accepted", "to": "playing" },
+      "stopped": { "status": "accepted", "to": "playing" },
+      "error": { "status": "rejected" }
+    },
+    "pause": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "rejected" },
+      "playing": { "status": "accepted", "to": "paused" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "rejected" },
+      "stopped": { "status": "rejected" },
+      "error": { "status": "rejected" }
+    },
+    "stop": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "stopped" },
+      "ready": { "status": "accepted", "to": "stopped" },
+      "playing": { "status": "accepted", "to": "stopped" },
+      "paused": { "status": "accepted", "to": "stopped" },
+      "ended": { "status": "accepted", "to": "stopped" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "stopped" }
+    },
+    "seek": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "paused" },
+      "stopped": { "status": "accepted", "to": "paused" },
+      "error": { "status": "rejected" }
+    },
+    "seek_relative": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "paused" },
+      "stopped": { "status": "accepted", "to": "paused" },
+      "error": { "status": "rejected" }
+    },
+    "set_volume": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "set_mute": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "set_subtitle_visible": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "load_subtitle": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "rejected" }
+    },
+    "set_danmaku_visible": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "set_danmaku_opacity": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "load_danmaku": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "rejected" }
+    },
+    "select_track": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": ["loading", "ready"] },
+      "playing": { "status": "accepted", "to": ["loading", "playing"] },
+      "paused": { "status": "accepted", "to": ["loading", "paused"] },
+      "ended": { "status": "accepted", "to": ["loading", "paused"] },
+      "stopped": { "status": "accepted", "to": ["loading", "paused"] },
+      "error": { "status": "rejected" }
+    },
+    "set_decode_mode": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": ["loading", "ready"] },
+      "playing": { "status": "accepted", "to": ["loading", "playing"] },
+      "paused": { "status": "accepted", "to": ["loading", "paused"] },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    }
+  }
+}

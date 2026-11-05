@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 116,
+  "op": "set_decode_mode",
+  "mode": "auto"
+}

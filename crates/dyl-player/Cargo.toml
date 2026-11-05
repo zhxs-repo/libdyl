@@ -1,0 +1,24 @@
+[package]
+name = "dyl-player"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl egui host-compositor desktop shell"
+
+[[bin]]
+name = "dyl-player"
+path = "src/main.rs"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-engine = { path = "../dyl-engine" }
+dyl-render = { path = "../dyl-render" }
+wgpu = { workspace = true }
+winit = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+pollster = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

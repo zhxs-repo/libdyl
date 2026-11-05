@@ -1,0 +1,38 @@
+[
+  {
+    "schema": 1,
+    "seq": 1,
+    "type": "state_changed",
+    "data": { "from": "idle", "to": "loading", "reason": "load" }
+  },
+  {
+    "schema": 1,
+    "seq": 2,
+    "type": "file_loaded",
+    "data": {
+      "request_id": 101,
+      "source": "D:\\video.mp4",
+      "duration_ms": 120000,
+      "media": {
+        "video": { "width": 1920, "height": 1080, "codec": "h264", "fps": 23.976 },
+        "audio": { "codec": "aac", "channels": 2, "sample_rate": 48000 },
+        "tracks": [
+          { "index": 0, "kind": "video", "codec": "h264", "language": null, "title": null, "default": true, "selected": true },
+          { "index": 1, "kind": "audio", "codec": "aac", "language": "eng", "title": null, "default": true, "selected": true }
+        ]
+      }
+    }
+  },
+  {
+    "schema": 1,
+    "seq": 3,
+    "type": "state_changed",
+    "data": { "from": "loading", "to": "ready", "reason": "load" }
+  },
+  {
+    "schema": 1,
+    "seq": 4,
+    "type": "command_completed",
+    "data": { "request_id": 101, "op": "load_file", "status": "ok" }
+  }
+]

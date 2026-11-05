@@ -1,0 +1,17 @@
+[package]
+name = "dyl-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl audio output: AudioOutput trait + platform implementations (cpal / AAudio)"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-ffmpeg = { path = "../dyl-ffmpeg" }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+# cpal is desktop-only. On Android cpal pulls in oboe (a C++/CMake build that
+# needs ninja + ANDROID_NDK_HOME at compile time) and we would not use it anyway:
+# `create_default_output` returns AaudioOutput there.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal = { workspace = true }

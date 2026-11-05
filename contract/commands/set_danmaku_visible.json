@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 110,
+  "op": "set_danmaku_visible",
+  "visible": true
+}

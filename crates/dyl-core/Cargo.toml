@@ -1,0 +1,10 @@
+[package]
+name = "dyl-core"
+version = "0.1.0"
+edition = "2021"
+description = "Dyl player core types: contract protocol types and internal error/stream info"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,21 @@
+[
+  {
+    "schema": 1,
+    "seq": 1,
+    "type": "settings_changed",
+    "data": {
+      "volume": 80,
+      "muted": true,
+      "decode_mode": "software",
+      "subtitle_visible": true,
+      "danmaku_visible": true,
+      "danmaku_opacity": 80
+    }
+  },
+  {
+    "schema": 1,
+    "seq": 2,
+    "type": "command_completed",
+    "data": { "request_id": 107, "op": "set_mute", "status": "ok" }
+  }
+]

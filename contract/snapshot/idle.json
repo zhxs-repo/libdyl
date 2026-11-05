@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "state": "idle",
+  "position_ms": 0,
+  "duration_ms": 0,
+  "volume": 80,
+  "muted": false,
+  "decode": { "mode": "software", "backend": "software", "device": null },
+  "source": null,
+  "media": null,
+  "subtitle": { "loaded": false, "visible": true, "source": null },
+  "danmaku": { "loaded": false, "visible": true, "opacity": 100, "count": 0, "source": null },
+  "surface": { "status": "none", "kind": null, "width": 0, "height": 0, "scale_factor": 1.0 },
+  "stats": { "rendered_frames": 0, "dropped_frames": 0 },
+  "last_error": null
+}

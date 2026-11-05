@@ -1,0 +1,39 @@
+[
+  {
+    "schema": 1,
+    "seq": 1,
+    "type": "state_changed",
+    "data": { "from": "paused", "to": "loading", "reason": "load" }
+  },
+  {
+    "schema": 1,
+    "seq": 2,
+    "type": "file_loaded",
+    "data": {
+      "request_id": 114,
+      "source": "D:\\movie.mkv",
+      "duration_ms": 120000,
+      "media": {
+        "video": { "width": 1920, "height": 1080, "codec": "h264", "fps": 23.976 },
+        "audio": { "codec": "dts", "channels": 6, "sample_rate": 48000 },
+        "tracks": [
+          { "index": 0, "kind": "video", "codec": "h264", "language": null, "title": null, "default": true, "selected": true },
+          { "index": 1, "kind": "audio", "codec": "aac", "language": "eng", "title": null, "default": true, "selected": false },
+          { "index": 2, "kind": "audio", "codec": "dts", "language": "jpn", "title": "5.1", "default": false, "selected": true }
+        ]
+      }
+    }
+  },
+  {
+    "schema": 1,
+    "seq": 3,
+    "type": "state_changed",
+    "data": { "from": "loading", "to": "paused", "reason": "load" }
+  },
+  {
+    "schema": 1,
+    "seq": 4,
+    "type": "command_completed",
+    "data": { "request_id": 114, "op": "select_track", "status": "ok" }
+  }
+]

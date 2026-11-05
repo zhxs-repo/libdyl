@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 108,
+  "op": "set_subtitle_visible",
+  "visible": false
+}
