@@ -895,14 +895,14 @@ impl ControlState {
     fn on_seek_applied(&mut self, tag: u64, position_secs: f64) {
         // 换轨的位置恢复走的是内部 seek（不建 pending_seek）：它一落地就解除位置钉，
         // 快照改读真实位置。这条命令自己只有那一个 command_completed。
-        if self
-            .pending_switch
-            .as_ref()
-            .is_some_and(|pending| pending.seek_tag == Some(tag))
-        {
-            self.pending_switch = None;
-            self.position_ms = secs_to_ms(position_secs);
-            self.publish();
+        if let Some(pending) = self.pending_switch.as_mut() {
+            if pending.seek_tag == Some(tag) {
+                // seek 落地：钉住目标位置而非 pipeline 报告的关键帧位置，
+                // 等 publish 时 live 追上目标才解除位置钉
+                pending.seek_tag = None;
+                self.position_ms = pending.position_ms;
+                self.publish();
+            }
         }
 
         let Some(pending) = self
@@ -1087,7 +1087,25 @@ impl ControlState {
             PlayerState::Ready | PlayerState::Playing | PlayerState::Paused
                 if self.pending_switch.is_some() =>
             {
-                self.position_ms
+                // seek 已落地后，live 追上目标（或到 EOF）才解除位置钉，
+                // 避免 exact seek 到关键帧的过渡中快照暴露关键帧位置
+                let seek_landed = self
+                    .pending_switch
+                    .as_ref()
+                    .is_some_and(|p| p.seek_tag.is_none());
+                if seek_landed {
+                    let live = self.live_position_ms();
+                    let at_eof = self.duration_ms > 0 && live >= self.duration_ms;
+                    if live >= self.position_ms || at_eof {
+                        self.pending_switch = None;
+                        self.position_ms = live;
+                        live
+                    } else {
+                        self.position_ms
+                    }
+                } else {
+                    self.position_ms
+                }
             }
             PlayerState::Ready | PlayerState::Playing | PlayerState::Paused => {
                 let live = self.live_position_ms();

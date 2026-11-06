@@ -5,6 +5,7 @@
 //! 硬件：没有设备时 FFmpeg 自己回退软解，测试只钉住"backend 与 device 一致、
 //! 位置不回跳、只发一个 command_completed"这些与设备无关的性质。
 
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
