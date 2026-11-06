@@ -9,12 +9,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
+#[cfg(target_os = "windows")]
+use dyl_core::contract::StateChangeReason;
 use dyl_core::contract::{
     Command, CommandEnvelope, CommandOp, CommandStatus, DecodeBackend, DecodeMode, Event,
     EventEnvelope, PlayerState,
 };
-#[cfg(target_os = "windows")]
-use dyl_core::contract::StateChangeReason;
 use dyl_engine::Engine;
 
 const WAIT: Duration = Duration::from_secs(20);
