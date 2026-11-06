@@ -11,12 +11,15 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Receiver;
 use dyl_core::contract::{
     Command, CommandEnvelope, CommandOp, CommandStatus, DecodeBackend, DecodeMode, Event,
-    EventEnvelope, PlayerState, StateChangeReason,
+    EventEnvelope, PlayerState,
 };
+#[cfg(target_os = "windows")]
+use dyl_core::contract::StateChangeReason;
 use dyl_engine::Engine;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+#[cfg(target_os = "windows")]
 fn asset_path() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_video.mp4");
     path.exists().then_some(path)
@@ -46,6 +49,7 @@ fn drain_until_completed(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn flush(rx: &Receiver<EventEnvelope>) {
     while rx.try_recv().is_ok() {}
 }

@@ -489,14 +489,8 @@ fn surface_descriptor(window: &Window) -> Result<SurfaceDescriptor, String> {
         (RawWindowHandle::Wayland(surface), RawDisplayHandle::Wayland(display)) => {
             Ok(SurfaceDescriptor::WaylandSurface {
                 schema: SCHEMA_VERSION,
-                surface: format!(
-                    "0x{:x}",
-                    surface.surface.map(|n| n.as_ptr() as usize).unwrap_or(0)
-                ),
-                display: format!(
-                    "0x{:x}",
-                    display.display.map(|n| n.as_ptr() as usize).unwrap_or(0)
-                ),
+                surface: format!("0x{:x}", surface.surface.as_ptr() as usize),
+                display: format!("0x{:x}", display.display.as_ptr() as usize),
                 width,
                 height,
                 scale_factor,
