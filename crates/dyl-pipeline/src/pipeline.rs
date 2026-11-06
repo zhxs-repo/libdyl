@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, Sender};
-use dyl_audio::{create_default_output, AudioOutput};
+use dyl_audio::{create_default_output, AudioOutput, NullAudioOutput};
 use dyl_core::contract::ErrorCode;
 use dyl_core::{AudioInfo, VideoInfo};
 use dyl_ffmpeg::{AudioDecoder, Demuxer, FfmpegAudioDecoder, FfmpegVideoDecoder, VideoDecoder};
@@ -374,9 +374,15 @@ impl Pipeline {
             tracing::info!("Pipeline::start: creating audio output...");
             let mut audio_output: Box<dyn AudioOutput> = create_default_output();
             if let Some(ref ai) = audio_info {
-                audio_output.init(ai.sample_rate, ai.channels)?;
+                if let Err(e) = audio_output.init(ai.sample_rate, ai.channels) {
+                    tracing::warn!("audio init failed ({e}); falling back to NullAudioOutput (headless / no device)");
+                    audio_output = Box::new(NullAudioOutput::new());
+                }
             } else if info.sample_rate > 0 {
-                audio_output.init(info.sample_rate, info.channels)?;
+                if let Err(e) = audio_output.init(info.sample_rate, info.channels) {
+                    tracing::warn!("audio init failed ({e}); falling back to NullAudioOutput (headless / no device)");
+                    audio_output = Box::new(NullAudioOutput::new());
+                }
             }
             tracing::info!("Pipeline::start: audio output initialized, spawning thread...");
             // 音频输出即主时钟来源；无音频轨时时钟未 ready，AVSync 自动回退挂钟

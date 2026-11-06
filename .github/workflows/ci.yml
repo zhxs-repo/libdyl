@@ -81,6 +81,7 @@ jobs:
       # 真实素材不入库：用同一组参数生成 5s / 640x360 / H.264+AAC 的验收素材，
       # e2e_playback 与 seek_storm 的断言都基于它
       - name: Generate test asset
+        shell: bash
         run: |
           ffmpeg -y -f lavfi -i testsrc2=duration=5:size=640x360:rate=30 \
                  -f lavfi -i sine=frequency=440:duration=5 \
@@ -138,6 +139,7 @@ jobs:
           echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
 
       - name: Generate test asset
+        shell: bash
         run: |
           ffmpeg -y -f lavfi -i testsrc2=duration=5:size=640x360:rate=30 \
                  -f lavfi -i sine=frequency=440:duration=5 \
