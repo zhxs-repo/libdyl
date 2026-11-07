@@ -60,7 +60,7 @@ jobs:
           # mesa-vulkan-drivers: 无 GPU 的 runner 上给 wgpu 一个 lavapipe 适配器
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev clang libclang-dev \
-            libvulkan1 mesa-vulkan-drivers libva-drm2
+            libvulkan1 mesa-vulkan-drivers libva-drm2 fonts-noto-cjk
           curl -fsSL "${{ matrix.ffmpeg_url }}" -o "$RUNNER_TEMP/ffmpeg.tar.xz"
           mkdir -p "$RUNNER_TEMP/ffmpeg"
           tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
