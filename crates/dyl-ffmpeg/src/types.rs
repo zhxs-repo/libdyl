@@ -224,6 +224,40 @@ pub enum ColorRange {
     Full,
 }
 
+/// 传输函数（EOTF/OETF）— 渲染端据此决定 SDR 直通还是 HDR 色调映射
+///
+/// 只区分渲染通路真正分叉的两种：SDR gamma 曲线原样上屏，PQ 需要先在
+/// 线性光里映射到 SDR 才能显示。HLG（`ARIB_STD_B67`）暂未实现映射，
+/// 与其它传输函数一样按 SDR 直通（画面偏灰，但不会比不识别更差）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorTransfer {
+    /// SDR gamma 曲线（BT.709/601/2020、sRGB、未标注）
+    #[default]
+    Sdr,
+    /// SMPTE ST 2084 (PQ)，HDR10 的传输函数
+    Pq,
+}
+
+impl ColorTransfer {
+    /// 与 `yuv_to_rgb.wgsl` 里 `ColorParams.transfer` 的取值一一对应
+    pub fn shader_index(self) -> u32 {
+        match self {
+            ColorTransfer::Sdr => 0,
+            ColorTransfer::Pq => 1,
+        }
+    }
+}
+
+impl From<ffmpeg_next::color::TransferCharacteristic> for ColorTransfer {
+    fn from(t: ffmpeg_next::color::TransferCharacteristic) -> Self {
+        use ffmpeg_next::color::TransferCharacteristic as T;
+        match t {
+            T::SMPTE2084 => ColorTransfer::Pq,
+            _ => ColorTransfer::Sdr,
+        }
+    }
+}
+
 /// 解析后的矩阵 — 渲染端唯一需要的形式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YuvMatrix {
@@ -264,6 +298,17 @@ impl From<ffmpeg_next::color::Primaries> for ColorPrimaries {
             P::BT2020 => ColorPrimaries::Bt2020,
             P::Unspecified => ColorPrimaries::Unspecified,
             _ => ColorPrimaries::Other,
+        }
+    }
+}
+
+impl ColorPrimaries {
+    /// 与 `yuv_to_rgb.wgsl` 里 `ColorParams.primaries` 的取值对应：
+    /// `2` = BT.2020（PQ 路径下做 2020→709 色域转换），其余为 `0`（不转换）
+    pub fn shader_index(self) -> u32 {
+        match self {
+            ColorPrimaries::Bt2020 => 2,
+            _ => 0,
         }
     }
 }
@@ -320,6 +365,8 @@ pub struct VideoFrame {
     pub color_primaries: ColorPrimaries,
     /// 采样量程（未标注为 `Unspecified`）
     pub color_range: ColorRange,
+    /// 传输函数（未标注按 SDR）；PQ 帧在渲染端做 HDR→SDR 色调映射
+    pub color_transfer: ColorTransfer,
     /// 平面数据（Y, U, V 或 Y, UV）
     pub planes: Vec<PlaneData>,
 }
@@ -729,6 +776,7 @@ mod tests {
             color_space: ColorSpace::Bt709,
             color_primaries: ColorPrimaries::Bt709,
             color_range: ColorRange::Limited,
+            color_transfer: ColorTransfer::Sdr,
             planes: vec![
                 PlaneData {
                     data: vec![0; 1920 * 1080],
@@ -796,6 +844,7 @@ mod tests {
             color_space: ColorSpace::Unspecified,
             color_primaries: ColorPrimaries::Unspecified,
             color_range: ColorRange::Unspecified,
+            color_transfer: ColorTransfer::Sdr,
             planes: vec![],
         };
         assert_eq!(frame.pts, None);
@@ -829,6 +878,7 @@ mod tests {
             color_space: ColorSpace::Unspecified,
             color_primaries: ColorPrimaries::Unspecified,
             color_range: ColorRange::Unspecified,
+            color_transfer: ColorTransfer::Sdr,
             planes: vec![],
         };
         assert_eq!(frame.pts_secs(), Some(0.0));
@@ -903,6 +953,7 @@ mod tests {
             color_space: space,
             color_primaries: primaries,
             color_range: range,
+            color_transfer: ColorTransfer::Sdr,
             planes: vec![],
         }
     }
@@ -1015,5 +1066,40 @@ mod tests {
         assert_eq!(YuvMatrix::Bt601.shader_index(), 0);
         assert_eq!(YuvMatrix::Bt709.shader_index(), 1);
         assert_eq!(YuvMatrix::Bt2020.shader_index(), 2);
+    }
+
+    /// 只有 PQ 走 HDR 色调映射；HLG 与其它曲线暂按 SDR 直通
+    #[test]
+    fn only_pq_transfer_is_hdr_mapped() {
+        use ffmpeg_next::color::TransferCharacteristic as FT;
+        assert_eq!(ColorTransfer::from(FT::SMPTE2084), ColorTransfer::Pq);
+        for t in [
+            FT::Unspecified,
+            FT::BT709,
+            FT::SMPTE170M,
+            FT::BT2020_10,
+            FT::ARIB_STD_B67,
+            FT::IEC61966_2_1,
+            FT::Linear,
+        ] {
+            assert_eq!(ColorTransfer::from(t), ColorTransfer::Sdr, "{t:?}");
+        }
+        assert_eq!(ColorTransfer::Sdr.shader_index(), 0);
+        assert_eq!(ColorTransfer::Pq.shader_index(), 1);
+    }
+
+    /// shader_index 是与 WGSL `ColorParams.primaries` 的约定：只有 BT.2020
+    /// 触发 2020→709 色域转换
+    #[test]
+    fn primaries_shader_index_only_marks_bt2020() {
+        assert_eq!(ColorPrimaries::Bt2020.shader_index(), 2);
+        for p in [
+            ColorPrimaries::Unspecified,
+            ColorPrimaries::Bt601,
+            ColorPrimaries::Bt709,
+            ColorPrimaries::Other,
+        ] {
+            assert_eq!(p.shader_index(), 0, "{p:?}");
+        }
     }
 }

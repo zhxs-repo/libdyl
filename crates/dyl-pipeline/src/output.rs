@@ -178,6 +178,8 @@ pub fn render_loop(
                 if first_frame {
                     first_frame = false;
                     pipeline.avsync.set_first_frame_time(pts);
+                    // 音频输出等这一帧再启动设备：音频主时钟先跑会让视频只能丢帧追赶
+                    pipeline.mark_first_frame_ready();
                     play_tick = std::time::Instant::now();
                 }
 
@@ -198,6 +200,15 @@ pub fn render_loop(
                         let mut attempts = 0;
                         loop {
                             std::thread::sleep(Duration::from_secs_f64(secs));
+                            // 等待期间可能发生 seek（换轨/切解码档位后的恢复 seek 尤其
+                            // 容易撞上）：这一帧已是旧位置的内容，再拿去决策只会被判成
+                            // "落后太多"而强制上屏 —— 画面回跳 + `AVSync: re-sync` 告警。
+                            // 入口处的 generation / pre-roll 两道闸门必须在这里重验
+                            if stamped.generation < pipeline.seek_generation.load(Ordering::Acquire)
+                                || is_pre_roll_frame(pts, pipeline.seek_target_secs())
+                            {
+                                continue 'outer;
+                            }
                             match pipeline.avsync.video_sync_decision(pts) {
                                 VideoSyncDecision::Display => break,
                                 VideoSyncDecision::Wait(s) => {
@@ -289,14 +300,19 @@ fn device_stall(
     (stalled >= budget).then_some(stalled)
 }
 
+/// 起播对齐等待上限：等首帧视频超过它就先放音频，宁可让视频追一次也别静音
+const FIRST_FRAME_ALIGN_TIMEOUT: Duration = Duration::from_millis(1500);
+
 pub fn audio_output_loop(
     pipeline: Arc<Pipeline>,
     mut audio_output: Box<dyn AudioOutput>,
     audio_frame_rx: crossbeam_channel::Receiver<Stamped<dyl_ffmpeg::AudioFrame>>,
+    has_video: bool,
 ) -> dyl_core::Result<()> {
     tracing::info!("audio_output_loop started");
 
     let mut device_paused = false;
+    let mut align_start: Option<Instant> = None;
     let mut last_seek_gen = pipeline.seek_generation.load(Ordering::Acquire);
     // 主时钟读数要带着它属于哪一次 seek，视频线程才能拒绝 flush 前入队的旧位置采样
     let clock = audio_output.clock();
@@ -340,6 +356,17 @@ pub fn audio_output_loop(
             // 停摆预算从恢复这一刻重新数起：暂停期间设备是被主动冻结的，
             // 时钟 age 里那段暂停不是设备故障
             playing_since = Instant::now();
+        }
+
+        // 起播对齐：解码器出首帧之前不启动音频设备。音频主时钟先跑到首帧
+        // 前面时，视频只能靠连续丢帧追回（4K 硬解实测起播 2.5s 内 12 次
+        // re-sync）；首帧迟迟不来（解码卡住）也不能一直静音，超时先放音频
+        if has_video && !pipeline.first_frame_ready() {
+            let started = *align_start.get_or_insert_with(Instant::now);
+            if started.elapsed() < FIRST_FRAME_ALIGN_TIMEOUT {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
         }
 
         // seek：缓冲里剩下的是旧位置的音频，既会先响一小段，
@@ -518,6 +545,115 @@ mod tests {
         assert!(
             !is_pre_roll_audio(&audio_frame(0.400, 0.0213), 0.0),
             "未 seek 时不过滤"
+        );
+    }
+
+    /// 只记录上屏 PTS 的输出：管线级断言认的是"到底交给宿主什么"
+    struct RecordingOutput {
+        submitted: Arc<parking_lot::Mutex<Vec<f64>>>,
+    }
+
+    impl dyl_render::VideoOutput for RecordingOutput {
+        fn submit_frame(&mut self, frame: &dyl_ffmpeg::VideoFrame) -> dyl_core::Result<()> {
+            self.submitted.lock().push(frame.pts_secs().unwrap_or(-1.0));
+            Ok(())
+        }
+
+        fn resize(&mut self, _width: u32, _height: u32) -> dyl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn video_frame(pts_secs: f64) -> dyl_ffmpeg::VideoFrame {
+        dyl_ffmpeg::VideoFrame {
+            pts: Some((pts_secs * 1000.0).round() as i64),
+            time_base: dyl_ffmpeg::time_base(1, 1000),
+            width: 2,
+            height: 2,
+            display_width: 2,
+            display_height: 2,
+            format: dyl_ffmpeg::PixelFormat::Yuv420p,
+            color_space: dyl_ffmpeg::ColorSpace::Unspecified,
+            color_primaries: dyl_ffmpeg::ColorPrimaries::Unspecified,
+            color_range: dyl_ffmpeg::ColorRange::Unspecified,
+            color_transfer: dyl_ffmpeg::ColorTransfer::Sdr,
+            planes: vec![],
+        }
+    }
+
+    /// 管线级：seek 已发布后，新 generation 的 pre-roll 帧与旧 generation 的残留帧
+    /// 都不得到达输出，只有目标帧上屏。裁剪值与 generation 的发布顺序由
+    /// `demux::tests::exact_seek_publishes_target_before_generation` 守住。
+    #[test]
+    fn pre_roll_of_the_new_generation_never_reaches_the_output() {
+        let (pipeline, _events) = pipeline();
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let slot = OutputSlot::new(Box::new(RecordingOutput {
+            submitted: submitted.clone(),
+        }));
+        let (tx, rx) = bounded::<Stamped<dyl_ffmpeg::VideoFrame>>(8);
+
+        pipeline.seek_target_us.store(2_000_000, Ordering::Release);
+        pipeline.avsync.reset(2.0);
+        pipeline.seek_generation.store(1, Ordering::Release);
+
+        tx.send(Stamped::new(0, video_frame(9.0))).unwrap();
+        tx.send(Stamped::new(1, video_frame(0.4))).unwrap();
+        tx.send(Stamped::new(1, video_frame(1.99))).unwrap();
+        tx.send(Stamped::new(1, video_frame(2.0))).unwrap();
+        drop(tx);
+
+        render_loop(Arc::new(pipeline), slot, rx, 10.0, true).unwrap();
+
+        assert_eq!(*submitted.lock(), vec![2.0], "只有目标帧可以上屏");
+    }
+
+    /// 回归：帧在 `Wait` 里睡着时发生 seek，醒来不得再上屏。
+    ///
+    /// 换轨恢复实测撞的就是这条：新管线首帧（pts 0.040）比刚起步的音频时钟超前
+    /// 40ms 进入 Wait，恢复 seek 在这 40ms 内把主时钟抬到 2.224s；醒来重新决策变成
+    /// "落后 2.184s"，防死亡螺旋于是强制上屏 —— 画面回跳 + `AVSync: re-sync` 告警。
+    #[test]
+    fn a_seek_during_the_wait_invalidates_the_frame() {
+        let (pipeline, _events) = pipeline();
+        let pipeline = Arc::new(pipeline);
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let slot = OutputSlot::new(Box::new(RecordingOutput {
+            submitted: submitted.clone(),
+        }));
+        let (tx, rx) = bounded::<Stamped<dyl_ffmpeg::VideoFrame>>(8);
+
+        // 首帧立即上屏（惰性锚定），第二帧超前挂钟 150ms → 进入 Wait（每次最多 50ms、
+        // 最多 3 次），这段就是 seek 可以插进来的窗口
+        tx.send(Stamped::new(0, video_frame(0.05))).unwrap();
+        tx.send(Stamped::new(0, video_frame(0.2))).unwrap();
+
+        let p = pipeline.clone();
+        let handle = std::thread::spawn(move || render_loop(p, slot, rx, 10.0, true).unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pipeline.position_us.load(Ordering::Acquire) != 50_000 {
+            assert!(Instant::now() < deadline, "首帧没有上屏");
+            std::hint::spin_loop();
+        }
+        // 让渲染线程真的收下第二帧并睡进 Wait：立刻发布 seek 的话第二帧还没被取走，
+        // 走的是 generation 陈旧丢弃那条路，测不到本回归要守的分支。
+        // Wait 每次最多 50ms、最多 3 次，10ms 落在窗口内且留了 140ms 余量
+        std::thread::sleep(Duration::from_millis(10));
+        // 按 demux 的发布顺序落一次 exact seek：裁剪值/position → avsync → generation
+        pipeline.seek_target_us.store(5_000_000, Ordering::Release);
+        pipeline.position_us.store(5_000_000, Ordering::Release);
+        pipeline.avsync.reset(5.0);
+        pipeline.seek_generation.store(1, Ordering::Release);
+
+        tx.send(Stamped::new(1, video_frame(5.0))).unwrap();
+        drop(tx);
+        handle.join().unwrap();
+
+        assert_eq!(
+            *submitted.lock(),
+            vec![0.05, 5.0],
+            "等待中的旧位置帧不得被强制上屏"
         );
     }
 

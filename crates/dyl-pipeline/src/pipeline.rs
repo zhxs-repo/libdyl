@@ -79,13 +79,18 @@ pub struct Pipeline {
     pub paused: Arc<AtomicBool>,
     /// 输入停滞看门狗的预算；`start` 按 URL 是本地还是网络选值
     pub(crate) input_stall_timeout: Duration,
+    /// 渲染线程已交出第一个视频帧 — 音频输出等它再启动设备，起播音画对齐
+    first_frame_ready: Arc<AtomicBool>,
     pub volume: Arc<AtomicU32>,
     pub muted: Arc<AtomicBool>,
     pub event_tx: Sender<PipelineEventMsg>,
     /// 本次播放会话标识：引擎据此丢弃重载后迟到的旧管线事件
     pub session: u64,
-    /// 本次管线实际启用的硬件设备名；`None` = 软解
-    decode_device: Option<String>,
+    /// 本次管线当前实际启用的硬件设备名；`None` = 软解
+    ///
+    /// 共享是因为解码线程可能在运行中回退软解（`DecoderNotice`），引擎据此
+    /// 把快照 `decode.backend` 从 hardware 改成 software
+    decode_device: Arc<Mutex<Option<String>>>,
     thread_handles: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
@@ -109,18 +114,36 @@ impl Pipeline {
             shutdown: Arc::new(AtomicBool::new(false)),
             paused,
             input_stall_timeout: INPUT_STALL_TIMEOUT,
+            first_frame_ready: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU32::new(100)),
             muted: Arc::new(AtomicBool::new(false)),
             event_tx,
             session,
-            decode_device: None,
+            decode_device: Arc::new(Mutex::new(None)),
             thread_handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// 本次管线实际启用的硬件设备名；`None` = 软解（或没有视频轨）
-    pub fn decode_device(&self) -> Option<&str> {
-        self.decode_device.as_deref()
+    /// 渲染线程已交出第一个视频帧
+    ///
+    /// 音频设备若先启动，音频主时钟会跑到首帧之前，视频只能丢帧追赶 —
+    /// 起播的前两秒就是这样跳过去的。音频输出等这个标志再写设备。
+    pub fn first_frame_ready(&self) -> bool {
+        self.first_frame_ready.load(Ordering::Acquire)
+    }
+
+    pub fn mark_first_frame_ready(&self) {
+        self.first_frame_ready.store(true, Ordering::Release);
+    }
+
+    /// 本次管线当前实际启用的硬件设备名；`None` = 软解（或没有视频轨）
+    pub fn decode_device(&self) -> Option<String> {
+        self.decode_device.lock().clone()
+    }
+
+    /// 解码后端变化（运行中回退软解）时更新
+    pub fn set_decode_device(&self, device: Option<String>) {
+        *self.decode_device.lock() = device;
     }
 
     /// 向引擎报告内部事件
@@ -237,7 +260,8 @@ impl Pipeline {
         self.demux_progress.store(0, Ordering::Release);
         self.seek_generation.store(0, Ordering::Release);
         self.position_us.store(0, Ordering::Release);
-        self.decode_device = None;
+        self.first_frame_ready.store(false, Ordering::Release);
+        self.set_decode_device(None);
         // 主时钟按新文件从零开始：AVSync 与本 pipeline 同生命周期，但 start 可能
         // 被同一实例再次调用，不重置就会拿着上一个文件的锚点与已接受的音频读数
         self.avsync.reset(0.0);
@@ -285,12 +309,13 @@ impl Pipeline {
             shutdown: self.shutdown.clone(),
             paused: self.paused.clone(),
             input_stall_timeout: self.input_stall_timeout,
+            first_frame_ready: self.first_frame_ready.clone(),
             volume: self.volume.clone(),
             muted: self.muted.clone(),
             event_tx: self.event_tx.clone(),
             session: self.session,
-            // 只给引擎读（publish 时取 `decode_device()`），线程内不需要这份副本
-            decode_device: None,
+            // 解码线程在运行中回退软解时要改这里，引擎 publish 时读到新后端
+            decode_device: self.decode_device.clone(),
             thread_handles: self.thread_handles.clone(),
         });
 
@@ -315,7 +340,7 @@ impl Pipeline {
             } else {
                 FfmpegVideoDecoder::new()
             };
-            self.decode_device = decoder.hardware_device();
+            self.set_decode_device(decoder.hardware_device());
             let video_decoder: Box<dyn VideoDecoder> = Box::new(decoder);
             let p = pipeline.clone();
             let reporter = pipeline.clone();
@@ -393,8 +418,10 @@ impl Pipeline {
                 .name("dyl-audio".into())
                 .spawn(move || {
                     tracing::info!("audio thread closure entered");
-                    Self::run_thread(|| audio_output_loop(p, audio_output, audio_frame_rx))
-                        .unwrap_or_else(|e| reporter.report_failure("audio output thread", &e));
+                    Self::run_thread(|| {
+                        audio_output_loop(p, audio_output, audio_frame_rx, has_video)
+                    })
+                    .unwrap_or_else(|e| reporter.report_failure("audio output thread", &e));
                 })
                 .map_err(|e| dyl_core::DylError::Internal(format!("spawn audio: {e}")))?;
             self.thread_handles.lock().push(h);

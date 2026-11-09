@@ -14,8 +14,10 @@ use dyl_ffmpeg::{
     Demuxer, FfmpegDemuxer, FfmpegVideoDecoder, TrackSelection, VideoCodecId, VideoDecoder,
 };
 
-fn asset() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../av1_test.mp4")
+mod common;
+
+fn asset() -> Option<std::path::PathBuf> {
+    common::asset("av1_test.mp4")
 }
 
 fn decode_all(policy: Policy) -> Option<usize> {
@@ -23,16 +25,16 @@ fn decode_all(policy: Policy) -> Option<usize> {
         eprintln!("跳过：本构建的 FFmpeg 没有 libdav1d / libaom-av1");
         return None;
     }
-    if !asset().exists() {
-        eprintln!("跳过：缺少 av1_test.mp4");
+    let Some(path) = asset() else {
+        eprintln!("跳过：缺少 av1_test.mp4（{}）", common::HOW_AV1);
         return None;
-    }
+    };
     ffmpeg_next::init().expect("ffmpeg init");
 
     let mut demuxer = FfmpegDemuxer::new();
     demuxer
         .open(
-            &asset().to_string_lossy(),
+            &path.to_string_lossy(),
             &TrackSelection::default(),
             Arc::new(AtomicBool::new(false)),
         )

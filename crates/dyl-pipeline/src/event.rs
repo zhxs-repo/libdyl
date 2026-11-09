@@ -25,6 +25,9 @@ pub enum PipelineEvent {
     },
     /// seek 请求未能应用；引擎据此以错误结局完成对应命令，但不进入 error 状态
     SeekFailed { tag: u64, message: String },
+    /// 非致命的运行时告警（如硬解吞吐不足已回退软解）；引擎转成契约
+    /// `Event::Warning`，播放继续
+    Warning { code: String, message: String },
     /// 致命错误：线程失败或看门狗判定停摆
     Error { code: ErrorCode, message: String },
 }

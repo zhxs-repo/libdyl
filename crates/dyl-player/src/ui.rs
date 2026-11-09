@@ -431,8 +431,8 @@ fn draw_track_menu(
     });
 }
 
-/// 解码菜单。`hw_decode` 为假时整个菜单不出现：内核的同步校验会直接拒绝
-/// `set_decode_mode auto`（`not_supported`），摆出来等于撒谎。
+/// 解码菜单。`hw_decode` 为假时整个菜单不出现：那里 `auto` 不尝试硬件、
+/// 恒等于软解，摆出"自动（硬解）"只会误导。
 fn draw_decode_menu(
     ui: &mut egui::Ui,
     snapshot: &Snapshot,

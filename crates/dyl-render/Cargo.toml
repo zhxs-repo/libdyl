@@ -12,3 +12,7 @@ pollster = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 raw-window-handle = "0.6"
+
+[dev-dependencies]
+# 与 wgpu 29 锁同一版本；只用于在无 GPU 的 CI 上解析 + 校验 WGSL
+naga = { version = "29.0.3", features = ["wgsl-in"] }

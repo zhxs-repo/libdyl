@@ -5,7 +5,7 @@
   "duration_ms": 0,
   "volume": 80,
   "muted": false,
-  "decode": { "mode": "software", "backend": "software", "device": null },
+  "decode": { "mode": "auto", "backend": "software", "device": null },
   "source": null,
   "media": null,
   "subtitle": { "loaded": false, "visible": true, "source": null },

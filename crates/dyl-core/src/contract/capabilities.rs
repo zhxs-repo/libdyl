@@ -76,8 +76,9 @@ pub struct FeatureCapabilities {
     pub embedded_ass_styling: bool,
     /// 是否提供 `select_track`。只覆盖音轨与字幕轨：视频轨切换未实现。
     pub track_switching: bool,
-    /// 是否实测过硬件解码。为 `false` 时 `set_decode_mode {mode: auto}` 同步
-    /// `not_supported`，客户端不应显示硬解开关。为 `true` 也只说明该平台的硬解
+    /// 是否实测过硬件解码。为 `false` 时 `auto` 不尝试硬件、按软解执行
+    /// （命令仍被接受；快照 `decode.mode` 报 `auto`，`backend` 报 `software`），
+    /// 客户端仍可据此隐藏"自动（硬解）"选项。为 `true` 也只说明该平台的硬解
     /// 路径可用，不构成解码白名单。
     pub hw_decode: bool,
     pub danmaku_formats: Vec<String>,

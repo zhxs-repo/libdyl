@@ -901,8 +901,9 @@ class FeatureCapabilities {
   /// `select_track` 是否可用。只覆盖音轨与字幕轨：视频轨切换未实现。
   final bool trackSwitching;
 
-  /// 硬件解码是否已实测可用。为 false 时 `setDecodeMode(DecodeMode.auto)`
-  /// 会被同步拒绝（not_supported），客户端不应显示硬解开关。
+  /// 硬件解码是否已实测可用。为 false 时 `auto` 不尝试硬件、按软解执行
+  /// （命令仍被接受；快照 `decode.backend` 为 software），客户端仍可据此
+  /// 隐藏"自动（硬解）"选项。
   final bool hwDecode;
   final List<String> danmakuFormats;
   final bool danmakuXmlEntities;

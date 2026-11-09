@@ -44,7 +44,7 @@ fn new_engine_starts_idle_with_contract_defaults() {
     assert_eq!(snapshot.duration_ms, 0);
     assert_eq!(snapshot.volume, 100);
     assert!(!snapshot.muted);
-    assert_eq!(snapshot.decode.mode, DecodeMode::Software);
+    assert_eq!(snapshot.decode.mode, DecodeMode::Auto);
     assert_eq!(snapshot.decode.backend, DecodeBackend::Software);
     assert!(snapshot.decode.device.is_none());
     assert!(snapshot.source.is_none());
@@ -95,7 +95,7 @@ fn set_volume_updates_snapshot_before_completion() {
         Event::SettingsChanged(settings) => {
             assert_eq!(settings.volume, 55);
             assert!(!settings.muted);
-            assert_eq!(settings.decode_mode, DecodeMode::Software);
+            assert_eq!(settings.decode_mode, DecodeMode::Auto);
             assert!(settings.subtitle_visible);
             assert!(settings.danmaku_visible);
             assert_eq!(settings.danmaku_opacity, 100);

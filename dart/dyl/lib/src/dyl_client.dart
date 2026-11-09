@@ -301,9 +301,11 @@ class DylClient {
   }) =>
       execute(SelectTrackCommand(kind: kind, index: index));
 
-  /// Switch the decode mode. `auto` prefers a hardware decoder and falls back
-  /// to software; a build/platform without a verified hardware path rejects it
-  /// synchronously with `not_supported` (see `capabilities.features.hw_decode`).
+  /// Switch the decode mode. `auto` (the default) prefers a hardware decoder
+  /// and falls back to software; on a build/platform without a verified
+  /// hardware path it is still accepted and simply runs software (see
+  /// `capabilities.features.hw_decode`; `snapshot.decode.backend` reports what
+  /// is actually in use).
   /// While a pipeline is alive the kernel reopens it (passes through `loading`,
   /// keeps the position) and no `file_loaded` is emitted; the effective backend
   /// is published as `snapshot.decode`.

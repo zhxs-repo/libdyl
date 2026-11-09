@@ -23,18 +23,19 @@ use dyl_engine::Engine;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+mod common;
+
 fn asset_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("DYL_MULTITRACK_ASSET") {
         let path = PathBuf::from(path);
         return path.exists().then_some(path);
     }
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../multitrack.mkv");
-    path.exists().then_some(path)
+    common::asset("multitrack.mkv")
 }
 
 fn skip_if_absent(asset: &Option<PathBuf>) -> bool {
     if asset.is_none() {
-        eprintln!("SKIP: multitrack.mkv 不存在，运行 bash scripts/make_multitrack_asset.sh 生成");
+        eprintln!("SKIP: multitrack.mkv 不存在，{}", common::HOW_MULTITRACK);
     }
     asset.is_none()
 }

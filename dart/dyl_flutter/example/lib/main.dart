@@ -88,7 +88,7 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _immersive = false;
 
   /// 解码设置与实际后端；快照的 `decode` 是真相，事件只用来及时刷新。
-  DecodeMode _decodeMode = DecodeMode.software;
+  DecodeMode _decodeMode = DecodeMode.auto;
   DecodeBackend _decodeBackend = DecodeBackend.software;
   String? _decodeDevice;
 
@@ -708,8 +708,8 @@ class _PlayerPageState extends State<PlayerPage> {
     return Tooltip(message: 'pick a video first', child: button);
   }
 
-  /// 解码方式下拉。`hw_decode` 能力位为假时整个菜单不出现：内核会在同步
-  /// 校验里拒绝 `auto`（`not_supported`），列出来等于撒谎。
+  /// 解码方式下拉。`hw_decode` 能力位为假时整个菜单不出现：那里 `auto`
+  /// 不尝试硬件、恒等于软解，列出"自动"只会误导。
   Widget? _decodeMenu(DylClient? client) {
     if (client == null || !client.capabilities.features.hwDecode) return null;
     return Row(

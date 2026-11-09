@@ -140,20 +140,24 @@ pub fn demux_loop(
             } else {
                 req.target
             };
-            // 递增 seek_generation：下游按 generation 丢弃 seek 之前入队的残留数据，
-            // 解码线程同时据此触发 decoder.flush()
-            let generation = pipeline.seek_generation.fetch_add(1, Ordering::Release) + 1;
-            // 重置 AVSync
-            pipeline.avsync.reset(actual);
+            // 只有 exact 要丢 pre-roll；keyframe 必须从关键帧完整播放
+            let drop_before = if req.exact { actual } else { 0.0 };
+            // 裁剪值与 position 必须先于 generation 发布：消费线程看到新 generation
+            // 就会收下新位置的 pre-roll 帧（`Stamped::is_stale` 只丢更旧的），紧接着
+            // 读裁剪值决定丢不丢。晚一步发布＝让它带着旧裁剪值漏进 avsync，而地板已
+            // 抬到落点，于是被判"落后太多"强制上屏（画面回跳 + re-sync 告警）
+            pipeline
+                .seek_target_us
+                .store((drop_before * 1_000_000.0) as u64, Ordering::Release);
             // position 立即对齐到落点，避免残留旧帧把进度条往回拽
             pipeline
                 .position_us
                 .store((actual * 1_000_000.0) as u64, Ordering::Release);
-            // 只有 exact 要丢 pre-roll；keyframe 必须从关键帧完整播放
-            let drop_before = if req.exact { actual } else { 0.0 };
-            pipeline
-                .seek_target_us
-                .store((drop_before * 1_000_000.0) as u64, Ordering::Release);
+            pipeline.avsync.reset(actual);
+            // 最后递增 seek_generation：下游按 generation 丢弃 seek 之前入队的残留
+            // 数据，解码线程同时据此触发 decoder.flush()。这里的 Release 与消费端的
+            // Acquire 构成同步链 —— 看到新 generation 就必然看到上面已发布的三个值
+            let generation = pipeline.seek_generation.fetch_add(1, Ordering::Release) + 1;
             // seek 之后还要继续读到目标位置之后的数据，EOF 标记不能沿用
             if seek_result.is_ok() {
                 pipeline.demux_complete.store(false, Ordering::Release);
@@ -658,6 +662,84 @@ mod tests {
 
         pipeline.shutdown.store(true, Ordering::Release);
         handle.join().unwrap();
+    }
+
+    /// 回归：消费线程看到新 generation 的那一刻，裁剪值必须已经是本次目标。
+    ///
+    /// 消费端（`recv_current`）不丢弃比快照更新的项，所以 generation 一前进就会
+    /// 收下新位置的 pre-roll 帧，紧接着读 `seek_target_us` 决定丢不丢。若裁剪值
+    /// 晚于 generation 发布，这一帧就带着旧裁剪值漏进 avsync，而地板已抬到新目标。
+    ///
+    /// 重复多次是因为单次窗口只有几微秒；修好后 Release/Acquire 链保证恒成立，
+    /// 不存在"偶尔失败"的合法结果。
+    #[test]
+    fn exact_seek_publishes_target_before_generation() {
+        let (event_tx, event_rx) = bounded::<PipelineEventMsg>(16);
+        let pipeline = Arc::new(Pipeline::new(event_tx, 7));
+        let demuxer: Box<dyn Demuxer> = Box::new(KeyframeDemuxer {
+            info: video_info(),
+            calls: 0,
+        });
+        let (video_pkt_tx, video_pkt_rx) = bounded::<Stamped<Packet>>(8);
+        let (audio_pkt_tx, _audio_pkt_rx) = bounded::<Stamped<Packet>>(8);
+
+        let p = pipeline.clone();
+        let handle = std::thread::spawn(move || {
+            demux_loop(p, demuxer, video_pkt_tx, audio_pkt_tx, None).unwrap()
+        });
+
+        const SEEKS: u64 = 64;
+        for i in 1..=SEEKS {
+            let target = i as f64;
+            *pipeline.seek_request.lock() = Some(crate::pipeline::SeekRequest {
+                target,
+                from: 0.0,
+                tag: i,
+                exact: true,
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let generation = pipeline.seek_generation.load(Ordering::Acquire);
+                if generation == i {
+                    assert_eq!(
+                        pipeline.seek_target_us.load(Ordering::Acquire),
+                        (target * 1_000_000.0) as u64,
+                        "generation {i} 已发布，seek_target_us 却还是旧值"
+                    );
+                    assert_eq!(
+                        pipeline.position_us.load(Ordering::Acquire),
+                        (target * 1_000_000.0) as u64,
+                        "generation {i} 已发布，position_us 却还是旧值"
+                    );
+                    break;
+                }
+                assert!(generation < i, "generation 跳到了 {generation}");
+                assert!(Instant::now() < deadline, "seek {i} 没被消费");
+                std::hint::spin_loop();
+            }
+
+            // 一次只留一个在途请求：等结局回来再发下一次
+            match event_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                PipelineEventMsg {
+                    session: 7,
+                    event:
+                        PipelineEvent::SeekApplied {
+                            tag,
+                            generation,
+                            position_secs,
+                        },
+                } => {
+                    assert_eq!((tag, generation), (i, i));
+                    assert_eq!(position_secs, target);
+                }
+                other => panic!("期望 SeekApplied，got {other:?}"),
+            }
+        }
+
+        pipeline.shutdown.store(true, Ordering::Release);
+        handle.join().unwrap();
+        drop(video_pkt_rx);
     }
 
     /// 只要通道有空位就一直供货，不产生 EOF

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::hwaccel::{self, HwPlan, Policy};
 use crate::types::*;
 use dyl_core::{DylError, Result};
@@ -17,6 +19,23 @@ pub trait VideoDecoder: Send {
 
     /// 刷新解码器（seek 后调用）
     fn flush(&mut self);
+
+    /// 本次解码当前实际使用的硬件设备名；运行中回退软解后变 `None`
+    fn hardware_device(&self) -> Option<String> {
+        None
+    }
+
+    /// 取走一条运行时通知（如硬解吞吐不足已回退软解），取后清空
+    fn take_notice(&mut self) -> Option<DecoderNotice> {
+        None
+    }
+}
+
+/// 解码器运行时通知 — 由管线转成契约 `Event::Warning`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecoderNotice {
+    pub code: &'static str,
+    pub message: String,
 }
 
 /// AudioDecoder trait — 音频解码器抽象
@@ -45,21 +64,131 @@ struct SwsScaler(ffmpeg_next::software::scaling::Context);
 
 unsafe impl Send for SwsScaler {}
 
+/// 解码帧 → 渲染通路输入格式的转换方式
+///
+/// 只做位深下调的两种格式走位移，不进 swscale：4K 的 10→8 单线程 swscale
+/// 实测 ~16ms/帧，正值 25fps 内容只有 40ms 预算；按采样右移是纯内存拷贝，
+/// 快一个数量级。4:2:2/4:4:4 等真正的重采样仍交给 swscale。
+enum Conversion {
+    Sws(SwsScaler),
+    /// YUV420P10LE → YUV420P（每采样右移 2）
+    Depth10Planar,
+    /// P010LE → NV12（每采样右移 8；UV 平面本就交织）
+    P010ToNv12,
+}
+
+/// 硬解吞吐看护 — 判断依据是"解一帧要多久"，帧率从 PTS 间隔学习
+///
+/// 解码持续跟不上时 AVSync 只能丢帧或强显，音频主时钟不会被视频改写，漂移
+/// 越积越大（旧 swscale 通路在 4K10 上忙时 45ms > 40ms 预算，40s 漂到 9.7s）。
+/// 本机加完位移降位深后硬解忙时 29.7ms、软解 7.0ms，都回到预算内；但更慢的
+/// 机器/更高码率仍可能超预算，与其让画面持续丢帧，不如运行中换回软解。
+///
+/// 只统计解码器调用内部的忙时（送包/取帧/回传/转换），下游通道阻塞不算：
+/// 那是渲染跟不上，不是解码器跟不上。
+struct FallbackWatch {
+    /// 重建软解所需的流参数；`None` = 这一路不参与自动回退（软解 /
+    /// 显式指定的设备 —— 用户点名要的设备不偷偷换掉）
+    parameters: Option<ffmpeg_next::codec::Parameters>,
+    /// 预热帧数：首帧含帧池/设备初始化，不能算进窗口
+    seen: u32,
+    busy: f64,
+    content: f64,
+    interval: Option<f64>,
+    last_pts: Option<f64>,
+    done: bool,
+}
+
+const FALLBACK_WARMUP_FRAMES: u32 = 24;
+const FALLBACK_WINDOW_SECS: f64 = 2.0;
+/// 窗口内解码忙时必须低于内容时长的这一比例才算跟得上
+///
+/// 1.05 而不是更宽松：旧 swscale 通路 4K 忙时 45ms 对 40ms 预算只超 12%，
+/// 1.15 的阈值会把"每 10 秒丢约 1 秒画面"判成健康。持续超过预算 5% 就已
+/// 经意味着 AVSync 必须靠丢帧维持，画面必然顿。
+const FALLBACK_SLOWDOWN: f64 = 1.05;
+
+impl FallbackWatch {
+    fn new(parameters: Option<ffmpeg_next::codec::Parameters>) -> Self {
+        Self {
+            parameters,
+            seen: 0,
+            busy: 0.0,
+            content: 0.0,
+            interval: None,
+            last_pts: None,
+            done: false,
+        }
+    }
+
+    /// 新窗口从零开始（seek 后卡顿不该累加到旧账上）
+    fn reset_window(&mut self) {
+        self.busy = 0.0;
+        self.content = 0.0;
+    }
+
+    /// 记录一帧产出；返回 `true` 表示持续跟不上，应回退软解
+    fn note_frame(&mut self, pts: Option<f64>) -> bool {
+        if self.parameters.is_none() || self.done {
+            return false;
+        }
+        if let Some(pts) = pts {
+            if let Some(last) = self.last_pts {
+                let delta = pts - last;
+                // 跨 seek 的跳变与异常间隔不参与帧率估计
+                if delta > 0.0 && delta < 0.5 {
+                    self.interval = Some(match self.interval {
+                        Some(ema) => ema * 0.9 + delta * 0.1,
+                        None => delta,
+                    });
+                }
+            }
+            self.last_pts = Some(pts);
+        }
+        self.seen += 1;
+        if self.seen <= FALLBACK_WARMUP_FRAMES {
+            self.reset_window();
+            return false;
+        }
+        let Some(interval) = self.interval else {
+            return false;
+        };
+        self.content += interval;
+        if self.content < FALLBACK_WINDOW_SECS {
+            return false;
+        }
+        let slow = self.busy > self.content * FALLBACK_SLOWDOWN;
+        tracing::debug!(
+            "fallback watch window: busy={:.3}s content={:.3}s interval={:.4}s slow={slow}",
+            self.busy,
+            self.content,
+            interval
+        );
+        self.reset_window();
+        self.done = slow;
+        slow
+    }
+}
+
 /// FFmpeg 视频解码器
 pub struct FfmpegVideoDecoder {
     decoder: Option<ffmpeg_next::decoder::Video>,
     pixel_format: PixelFormat,
     /// 解码输出格式不被渲染通路支持时（10-bit HEVC、4:2:2/4:4:4 等）在此挂载，
-    /// 统一转成 YUV420P；`None` 表示解码帧原样输出
-    scaler: Option<SwsScaler>,
+    /// 统一转成渲染通路认得的格式；`None` 表示解码帧原样输出
+    conversion: Option<Conversion>,
     /// Packet/Frame 时间基 — 视频解码帧 PTS 直接沿用输入 Packet 的时间基
     pkt_timebase: ffmpeg_next::Rational,
-    /// 硬解方案；`None` = 这一路是软解（今天的默认）
+    /// 硬解方案；`None` = 这一路是软解
     hw: Option<HwPlan>,
     /// GPU 帧回传的落点，缓冲跨帧复用（见 `hwaccel::prepare_cpu_frame`）
     cpu_frame: ffmpeg_next::frame::Video,
     /// 当前输出通路是按哪一路"源格式 + 尺寸"配的；帧上一变就重建
     configured: Option<(ffmpeg_next::format::Pixel, u32, u32)>,
+    fallback: FallbackWatch,
+    /// 回退软解后等到的下一个关键帧之前，其余包全部跳过
+    await_key: bool,
+    notice: Option<DecoderNotice>,
 }
 
 impl FfmpegVideoDecoder {
@@ -67,11 +196,14 @@ impl FfmpegVideoDecoder {
         Self {
             decoder: None,
             pixel_format: PixelFormat::Unknown,
-            scaler: None,
+            conversion: None,
             pkt_timebase: ffmpeg_next::Rational::new(0, 1),
             hw: None,
             cpu_frame: ffmpeg_next::frame::Video::empty(),
             configured: None,
+            fallback: FallbackWatch::new(None),
+            await_key: false,
+            notice: None,
         }
     }
 
@@ -92,6 +224,13 @@ impl FfmpegVideoDecoder {
     /// 解码器**声明**了该设备，GPU 是否支持 AV1 要到 `avcodec_open2` 才知道。
     pub fn with_policy(mut ctx: ffmpeg_next::codec::Context, policy: Policy) -> Result<Self> {
         let is_av1 = ctx.id() == ffmpeg_next::codec::Id::AV1;
+        // FFmpeg 的 `threads` 默认是 1；CLI 的"自动"其实是它自己另设的。4K10
+        // 单线程解码只有 ~20fps，帧线程按 CPU 数开（0 = auto）后软解快 3× 以上，
+        // 硬解也不再逐包同步等 GPU
+        ctx.set_threading(ffmpeg_next::codec::threading::Config {
+            kind: ffmpeg_next::codec::threading::Type::Frame,
+            count: 0,
+        });
         let mut plan = hwaccel::select(ffmpeg_next::ffi::AVCodecID::from(ctx.id()), policy);
         if let Some(plan) = plan.as_ref() {
             // SAFETY: 拿到的是本函数独占的 `Context` 的原始指针，且在打开解码器
@@ -100,6 +239,15 @@ impl FfmpegVideoDecoder {
         }
         let av1_fallback = if is_av1 && plan.is_some() && matches!(policy, Policy::Auto) {
             Some(codec_parameters(&ctx)?)
+        } else {
+            None
+        };
+        // 运行中回退软解也靠这份参数重建上下文；显式点名的设备不参与自动回退
+        let runtime_fallback = if plan.is_some() && matches!(policy, Policy::Auto) {
+            Some(match av1_fallback.as_ref() {
+                Some(parameters) => parameters.clone(),
+                None => codec_parameters(&ctx)?,
+            })
         } else {
             None
         };
@@ -112,10 +260,14 @@ impl FfmpegVideoDecoder {
                     Some(parameters) => {
                         tracing::warn!("AV1 硬解打开失败（{e}），回退软件解码");
                         plan = None;
-                        let fresh = ffmpeg_next::codec::Context::from_parameters(parameters)
+                        let mut fresh = ffmpeg_next::codec::Context::from_parameters(parameters)
                             .map_err(|e| {
                                 DylError::Decode(format!("rebuild AV1 software context: {e}"))
                             })?;
+                        fresh.set_threading(ffmpeg_next::codec::threading::Config {
+                            kind: ffmpeg_next::codec::threading::Type::Frame,
+                            count: 0,
+                        });
                         open_software_av1(fresh)?
                     }
                     None => {
@@ -125,23 +277,27 @@ impl FfmpegVideoDecoder {
             }
         };
         let open_source = (video.format(), video.width(), video.height());
-        let (pixel_format, scaler) = configure_output(open_source.0, open_source.1, open_source.2)?;
+        let (pixel_format, conversion) =
+            configure_output(open_source.0, open_source.1, open_source.2)?;
         // avctx.pkt_timebase 打开时通常为 0/1（未设置），实际时间基由首个 Packet 携带
         let pkt_timebase = video.packet_time_base();
+        let threading = video.threading();
         tracing::info!(
-            "FfmpegVideoDecoder from_stream_context: {}x{} {:?} (解码输出 {:?}, 转换={}, 硬解={}), pkt_timebase={}",
+            "FfmpegVideoDecoder from_stream_context: {}x{} {:?} (解码输出 {:?}, 转换={}, 硬解={}, 线程={:?}x{}), pkt_timebase={}",
             video.width(),
             video.height(),
             pixel_format,
             video.format(),
-            scaler.is_some(),
+            conversion_name(conversion.as_ref()),
             plan.as_ref().map(HwPlan::describe).unwrap_or_else(|| "关".into()),
+            threading.kind,
+            threading.count,
             pkt_timebase
         );
         Ok(Self {
             decoder: Some(video),
             pixel_format,
-            scaler,
+            conversion,
             pkt_timebase,
             cpu_frame: ffmpeg_next::frame::Video::empty(),
             // 装了硬解时打开所报告的格式并不作数（`get_format` 要到第一次解帧
@@ -149,6 +305,9 @@ impl FfmpegVideoDecoder {
             // 纯软解保持原样，打开时就定下，行为与接硬解之前逐字节一致
             configured: plan.is_none().then_some(open_source),
             hw: plan,
+            fallback: FallbackWatch::new(runtime_fallback),
+            await_key: false,
+            notice: None,
         })
     }
 }
@@ -209,13 +368,64 @@ impl FfmpegVideoDecoder {
         self.hw.as_ref().map(HwPlan::device_name)
     }
 
+    /// 运行时回退软解：用打开前保存的流参数重建上下文
+    ///
+    /// 与打开时的 AV1 回退同一条路：参数里带着编码格式与 extradata，重建后
+    /// 从下一个关键帧继续解码（解码器对象在整个 GOP 中途换不了，换完必须由
+    /// IDR 重新起头）。重建失败不致命 —— 保留原硬解，回退看护就此关掉。
+    fn rebuild_software(&mut self) -> Result<()> {
+        let parameters = self.fallback.parameters.clone().ok_or_else(|| {
+            DylError::Internal("runtime fallback without stream parameters".into())
+        })?;
+        let device = self
+            .hw
+            .as_ref()
+            .map(HwPlan::describe)
+            .unwrap_or_else(|| "hardware".into());
+        let is_av1 = parameters.id() == ffmpeg_next::codec::Id::AV1;
+        let mut fresh = ffmpeg_next::codec::Context::from_parameters(parameters)
+            .map_err(|e| DylError::Decode(format!("rebuild software context: {e}")))?;
+        fresh.set_threading(ffmpeg_next::codec::threading::Config {
+            kind: ffmpeg_next::codec::threading::Type::Frame,
+            count: 0,
+        });
+        let video = if is_av1 {
+            open_software_av1(fresh)?
+        } else {
+            fresh
+                .decoder()
+                .video()
+                .map_err(|e| DylError::Decode(format!("open software decoder: {e}")))?
+        };
+        tracing::info!(
+            "FfmpegVideoDecoder 回退软解: {}x{} {:?}",
+            video.width(),
+            video.height(),
+            video.format()
+        );
+        self.pkt_timebase = video.packet_time_base();
+        self.decoder = Some(video);
+        self.hw = None;
+        // 源格式随后端改变（P010LE → YUV420P10LE 等），首帧会重新配对输出通路
+        self.configured = None;
+        self.notice = Some(DecoderNotice {
+            code: "hardware_decode_too_slow",
+            message: format!(
+                "{device} cannot keep up with the stream's frame rate; \
+                 switched to software decode"
+            ),
+        });
+        Ok(())
+    }
+
     /// 解码器上下文上的色彩元数据 — 帧未标注时的回退来源
-    fn context_color(&self) -> (ColorSpace, ColorPrimaries, ColorRange) {
+    fn context_color(&self) -> (ColorSpace, ColorPrimaries, ColorRange, ColorTransfer) {
         match self.decoder.as_ref() {
             Some(d) => (
                 ColorSpace::from(d.color_space()),
                 ColorPrimaries::from(d.color_primaries()),
                 ColorRange::from(d.color_range()),
+                ColorTransfer::from(d.color_transfer_characteristic()),
             ),
             None => Default::default(),
         }
@@ -227,46 +437,45 @@ impl FfmpegVideoDecoder {
     /// 才被调），而候选里没有匹配的硬件格式会静默落回软解——两种情况下都只有
     /// 帧上的格式是真的，所以通路不能只在打开时配一次。
     ///
-    /// swscale 只搬像素、不搬 AVFrame 属性，所以宽高与平面取自转换后的帧，
-    /// PTS 与色彩元数据仍由调用方从解码帧上读。
+    /// 转换器只搬像素、不搬 AVFrame 属性，所以宽高与平面取转换结果，PTS 与
+    /// 色彩元数据仍由调用方从解码帧上读。
     fn take_planes(
         &mut self,
         pixels: &ffmpeg_next::frame::Video,
     ) -> Result<(u32, u32, Vec<PlaneData>)> {
         let source = (pixels.format(), pixels.width(), pixels.height());
         if self.configured != Some(source) {
-            let (pixel_format, scaler) = configure_output(source.0, source.1, source.2)?;
+            let (pixel_format, conversion) = configure_output(source.0, source.1, source.2)?;
             tracing::info!(
                 "FfmpegVideoDecoder 输出通路改为 {:?} {}x{} → {:?} (转换={})",
                 source.0,
                 source.1,
                 source.2,
                 pixel_format,
-                scaler.is_some()
+                conversion_name(conversion.as_ref())
             );
             self.pixel_format = pixel_format;
-            self.scaler = scaler;
+            self.conversion = conversion;
             self.configured = Some(source);
         }
-        match self.scaler.as_mut() {
-            Some(scaler) => {
+        let planes = match self.conversion.as_mut() {
+            Some(Conversion::Sws(scaler)) => {
                 let mut dst = ffmpeg_next::frame::Video::empty();
                 scaler
                     .0
                     .run(pixels, &mut dst)
                     .map_err(|e| DylError::Decode(format!("swscale: {e}")))?;
-                Ok((
+                return Ok((
                     dst.width(),
                     dst.height(),
                     video_planes(&dst, self.pixel_format),
-                ))
+                ));
             }
-            None => Ok((
-                pixels.width(),
-                pixels.height(),
-                video_planes(pixels, self.pixel_format),
-            )),
-        }
+            Some(Conversion::Depth10Planar) => depth10_planes(pixels),
+            Some(Conversion::P010ToNv12) => p010_planes(pixels),
+            None => video_planes(pixels, self.pixel_format),
+        };
+        Ok((pixels.width(), pixels.height(), planes))
     }
 }
 
@@ -323,6 +532,74 @@ fn read_back_frame(
 
 impl VideoDecoder for FfmpegVideoDecoder {
     fn submit_packet(&mut self, packet: &Packet) -> Result<()> {
+        // 已决定回退软解：跳过当前 GOP 的剩余包，等下一个关键帧时换解码器。
+        // 立即重建会把这段画面整段黑掉，等关键帧则画面连续到切换点
+        if self.await_key {
+            if !packet.is_key {
+                return Ok(());
+            }
+            self.await_key = false;
+            if let Err(e) = self.rebuild_software() {
+                tracing::warn!("hardware decode fallback failed ({e}); keeping hardware path");
+            }
+        }
+        let started = Instant::now();
+        let result = self.send_packet_inner(packet);
+        self.fallback.busy += started.elapsed().as_secs_f64();
+        result
+    }
+
+    fn receive_frame(&mut self) -> Result<Option<VideoFrame>> {
+        let started = Instant::now();
+        let result = self.receive_frame_inner();
+        self.fallback.busy += started.elapsed().as_secs_f64();
+        if let Ok(Some(frame)) = &result {
+            let pts_secs = frame.pts.map(|pts| {
+                pts as f64 * frame.time_base.numerator() as f64
+                    / frame.time_base.denominator() as f64
+            });
+            if self.fallback.note_frame(pts_secs) {
+                tracing::warn!(
+                    "hardware decode can't keep up ({:.1}ms/frame budget); \
+                     switching to software at the next keyframe",
+                    self.fallback.interval.unwrap_or(0.0) * 1000.0
+                );
+                self.await_key = true;
+            }
+        }
+        result
+    }
+
+    fn send_eof(&mut self) -> Result<()> {
+        let decoder = self
+            .decoder
+            .as_mut()
+            .ok_or_else(|| DylError::InvalidState("video decoder not configured".into()))?;
+        decoder
+            .send_eof()
+            .map_err(|e| DylError::Decode(format!("send_eof: {e}")))?;
+        Ok(())
+    }
+
+    fn flush(&mut self) {
+        if let Some(dec) = self.decoder.as_mut() {
+            dec.flush();
+        }
+        // seek 造成的卡顿不该和旧窗口累计到一起
+        self.fallback.reset_window();
+    }
+
+    fn hardware_device(&self) -> Option<String> {
+        self.hw.as_ref().map(HwPlan::device_name)
+    }
+
+    fn take_notice(&mut self) -> Option<DecoderNotice> {
+        self.notice.take()
+    }
+}
+
+impl FfmpegVideoDecoder {
+    fn send_packet_inner(&mut self, packet: &Packet) -> Result<()> {
         let decoder = self
             .decoder
             .as_mut()
@@ -339,8 +616,8 @@ impl VideoDecoder for FfmpegVideoDecoder {
         Ok(())
     }
 
-    fn receive_frame(&mut self) -> Result<Option<VideoFrame>> {
-        let (ctx_space, ctx_primaries, ctx_range) = self.context_color();
+    fn receive_frame_inner(&mut self) -> Result<Option<VideoFrame>> {
+        let (ctx_space, ctx_primaries, ctx_range, ctx_transfer) = self.context_color();
         let decoder = self
             .decoder
             .as_mut()
@@ -357,7 +634,7 @@ impl VideoDecoder for FfmpegVideoDecoder {
                     read_back_frame(self.hw.as_ref(), &frame, &mut self.cpu_frame)?;
                 }
                 // 把复用的回传目标从 self 借出来当局部源，用完立刻放回去：
-                // `&self.cpu_frame` 与 `self.scaler.as_mut()` 同时存在过不了借用检查
+                // `&self.cpu_frame` 与 `self.conversion.as_mut()` 同时存在过不了借用检查
                 let cpu = from_hw.then(|| {
                     std::mem::replace(&mut self.cpu_frame, ffmpeg_next::frame::Video::empty())
                 });
@@ -386,6 +663,12 @@ impl VideoDecoder for FfmpegVideoDecoder {
                     ColorRange::Unspecified => ctx_range,
                     r => r,
                 };
+                // 传输函数沿用同一条"帧优先、上下文兜底"的回退：HEVC 的 VUI
+                // 解析结果通常只落在 ctx 上
+                let color_transfer = match frame.color_transfer_characteristic() {
+                    ffmpeg_next::color::TransferCharacteristic::Unspecified => ctx_transfer,
+                    t => ColorTransfer::from(t),
+                };
                 // 编码宽高之外还要给渲染几何一份显示尺寸：非方形像素（SAR≠1）
                 // 的视频如果只按编码宽高等比适配，画面会被拉变形
                 let (display_width, display_height) = display_size(width, height, sar_num, sar_den);
@@ -401,28 +684,12 @@ impl VideoDecoder for FfmpegVideoDecoder {
                     color_space,
                     color_primaries,
                     color_range,
+                    color_transfer,
                     planes,
                 }))
             }
             Err(e) if is_eagain(&e) => Ok(None),
             Err(e) => Err(DylError::Decode(format!("receive_frame: {e}"))),
-        }
-    }
-
-    fn send_eof(&mut self) -> Result<()> {
-        let decoder = self
-            .decoder
-            .as_mut()
-            .ok_or_else(|| DylError::InvalidState("video decoder not configured".into()))?;
-        decoder
-            .send_eof()
-            .map_err(|e| DylError::Decode(format!("send_eof: {e}")))?;
-        Ok(())
-    }
-
-    fn flush(&mut self) {
-        if let Some(dec) = self.decoder.as_mut() {
-            dec.flush();
         }
     }
 }
@@ -590,20 +857,116 @@ fn configure_output(
     src_format: ffmpeg_next::format::Pixel,
     width: u32,
     height: u32,
-) -> Result<(PixelFormat, Option<SwsScaler>)> {
+) -> Result<(PixelFormat, Option<Conversion>)> {
+    use ffmpeg_next::format::Pixel;
     if is_hw_pixel(src_format) {
         return Err(DylError::Decode(format!(
             "output path asked for hardware pixel format {src_format:?}; \
              read it back with av_hwframe_transfer_data first"
         )));
     }
+    // 10-bit 只降位深：4K 单线程 swscale 要 ~16ms/帧，位移是纯内存拷贝
+    match src_format {
+        Pixel::YUV420P10LE => {
+            return Ok((PixelFormat::Yuv420p, Some(Conversion::Depth10Planar)));
+        }
+        Pixel::P010LE => {
+            return Ok((PixelFormat::Nv12, Some(Conversion::P010ToNv12)));
+        }
+        _ => {}
+    }
     match PixelFormat::from(src_format) {
         PixelFormat::Unknown => match build_scaler(src_format, width, height) {
-            Some(scaler) => Ok((PixelFormat::Yuv420p, Some(scaler))),
+            Some(scaler) => Ok((PixelFormat::Yuv420p, Some(Conversion::Sws(scaler)))),
             None => Ok((PixelFormat::Unknown, None)),
         },
         pixel_format => Ok((pixel_format, None)),
     }
+}
+
+fn conversion_name(conversion: Option<&Conversion>) -> &'static str {
+    match conversion {
+        Some(Conversion::Sws(_)) => "swscale",
+        Some(Conversion::Depth10Planar) => "位深10→8",
+        Some(Conversion::P010ToNv12) => "P010→NV12",
+        None => "无",
+    }
+}
+
+/// YUV420P10LE → 三个 8-bit 平面（每采样右移 2）
+fn depth10_planes(frame: &ffmpeg_next::frame::Video) -> Vec<PlaneData> {
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
+    let (chroma_width, chroma_height) = (width / 2, height / 2);
+    vec![
+        PlaneData {
+            data: shift16_to_8(frame.data(0), frame.stride(0), width, height, 2),
+            stride: width,
+        },
+        PlaneData {
+            data: shift16_to_8(
+                frame.data(1),
+                frame.stride(1),
+                chroma_width,
+                chroma_height,
+                2,
+            ),
+            stride: chroma_width,
+        },
+        PlaneData {
+            data: shift16_to_8(
+                frame.data(2),
+                frame.stride(2),
+                chroma_width,
+                chroma_height,
+                2,
+            ),
+            stride: chroma_width,
+        },
+    ]
+}
+
+/// P010LE → NV12（每采样右移 8；UV 平面本就是交织的，逐行照搬）
+fn p010_planes(frame: &ffmpeg_next::frame::Video) -> Vec<PlaneData> {
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
+    vec![
+        PlaneData {
+            data: shift16_to_8(frame.data(0), frame.stride(0), width, height, 8),
+            stride: width,
+        },
+        PlaneData {
+            // 色度：每行 width/2 个像素 × U/V 两个分量 = width 个 u16
+            data: shift16_to_8(frame.data(1), frame.stride(1), width, height / 2, 8),
+            stride: width,
+        },
+    ]
+}
+
+/// 把 16-bit 采样行右移成 8-bit 紧凑平面
+///
+/// 源行可能带对齐填充（`src_stride` 一般大于有效宽度），输出不带填充——
+/// 渲染端会自行补齐 wgpu 的行对齐。缓冲比声明尺寸短时其余行补零，长度恒为
+/// `out_row_bytes * rows`。
+fn shift16_to_8(
+    src: &[u8],
+    src_stride: usize,
+    out_row_bytes: usize,
+    rows: usize,
+    shift: u32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; out_row_bytes * rows];
+    for row in 0..rows {
+        let Some(line) = src.get(row * src_stride..) else {
+            break;
+        };
+        let usable = (out_row_bytes * 2).min(line.len());
+        let (pairs, _) = line[..usable].as_chunks::<2>();
+        for (index, pair) in pairs.iter().enumerate() {
+            out[row * out_row_bytes + index] = (u16::from_le_bytes(*pair) >> shift) as u8;
+        }
+    }
+    out
 }
 
 /// 渲染通路只认 YUV420P / NV12 / RGB24 / BGRA；其它格式（10-bit、16-bit、
@@ -1055,7 +1418,7 @@ mod tests {
     fn test_video_decoder_new() {
         let d = FfmpegVideoDecoder::new();
         assert!(d.decoder.is_none());
-        assert!(d.scaler.is_none());
+        assert!(d.conversion.is_none());
     }
 
     #[test]
@@ -1214,14 +1577,122 @@ mod tests {
             };
             assert!(matches!(err, DylError::Decode(_)), "{pixel:?}: {err}");
         }
-        let (format, scaler) =
+        let (format, conversion) =
             configure_output(ffmpeg_next::format::Pixel::YUV420P, 64, 64).expect("yuv420p config");
         assert_eq!(format, PixelFormat::Yuv420p);
-        assert!(scaler.is_none(), "native format needs no conversion");
+        assert!(conversion.is_none(), "native format needs no conversion");
 
-        let (format, scaler) = configure_output(ffmpeg_next::format::Pixel::YUV420P10LE, 64, 64)
-            .expect("10-bit config");
+        let (format, conversion) =
+            configure_output(ffmpeg_next::format::Pixel::YUV420P10LE, 64, 64)
+                .expect("10-bit config");
         assert_eq!(format, PixelFormat::Yuv420p);
-        assert!(scaler.is_some(), "10-bit must convert, not lose chroma");
+        assert!(
+            matches!(conversion, Some(Conversion::Depth10Planar)),
+            "10-bit must convert, not lose chroma"
+        );
+
+        let (format, conversion) =
+            configure_output(ffmpeg_next::format::Pixel::P010LE, 64, 64).expect("p010 config");
+        assert_eq!(format, PixelFormat::Nv12);
+        assert!(
+            matches!(conversion, Some(Conversion::P010ToNv12)),
+            "P010 回传帧必须落成渲染端认得的 NV12"
+        );
+    }
+
+    /// 位深下调只是右移：10-bit 的 940/512 与 P010 的 240/128 都必须精确落回
+    /// 8-bit 的 235/128，且输出是不带源行填充的紧凑平面
+    #[test]
+    fn depth_conversions_shift_to_tight_8bit_planes() {
+        use ffmpeg_next::format::Pixel;
+
+        let mut planar = ffmpeg_next::frame::Video::new(Pixel::YUV420P10LE, 64, 32);
+        for row in 0..32usize {
+            let stride = planar.stride(0);
+            for x in 0..64 {
+                let value = (200u16 << 2).to_ne_bytes();
+                planar.data_mut(0)[row * stride + x * 2..row * stride + x * 2 + 2]
+                    .copy_from_slice(&value);
+            }
+        }
+        for plane in [1, 2] {
+            let stride = planar.stride(plane);
+            for row in 0..16usize {
+                for x in 0..32 {
+                    let value = (128u16 << 2).to_ne_bytes();
+                    planar.data_mut(plane)[row * stride + x * 2..row * stride + x * 2 + 2]
+                        .copy_from_slice(&value);
+                }
+            }
+        }
+        let planes = depth10_planes(&planar);
+        assert_eq!(planes.len(), 3);
+        assert_eq!(planes[0].stride, 64);
+        assert_eq!(planes[0].data.len(), 64 * 32, "输出必须紧凑、逐行无填充");
+        assert!(planes[0].data.iter().all(|&v| v == 200));
+        assert_eq!(planes[1].stride, 32);
+        assert_eq!(planes[1].data.len(), 32 * 16);
+        assert!(planes[1].data.iter().all(|&v| v == 128));
+
+        let mut p010 = ffmpeg_next::frame::Video::new(Pixel::P010LE, 64, 32);
+        for row in 0..32usize {
+            let stride = p010.stride(0);
+            for x in 0..64 {
+                let value = (235u16 << 8).to_ne_bytes();
+                p010.data_mut(0)[row * stride + x * 2..row * stride + x * 2 + 2]
+                    .copy_from_slice(&value);
+            }
+        }
+        let stride = p010.stride(1);
+        for row in 0..16usize {
+            for x in 0..64 {
+                let value = (128u16 << 8).to_ne_bytes();
+                p010.data_mut(1)[row * stride + x * 2..row * stride + x * 2 + 2]
+                    .copy_from_slice(&value);
+            }
+        }
+        let planes = p010_planes(&p010);
+        assert_eq!(planes.len(), 2, "P010 落成 NV12 只有 Y + 交织 UV");
+        assert_eq!(planes[0].data.len(), 64 * 32);
+        assert!(planes[0].data.iter().all(|&v| v == 235));
+        assert_eq!(planes[1].stride, 64, "UV 每行 32 像素 × 2 分量 = 64 字节");
+        assert_eq!(planes[1].data.len(), 64 * 16);
+        assert!(planes[1].data.iter().all(|&v| v == 128));
+    }
+
+    /// 看护窗口：预热帧不计账；窗口内忙时超过内容时长 1.15 倍才回退，且只回退一次
+    #[test]
+    fn fallback_watch_needs_sustained_slowdown() {
+        let mut watch = FallbackWatch::new(Some(ffmpeg_next::codec::Parameters::new()));
+        // 40ms/帧 = 25fps；预热期怎么慢都不算
+        for frame in 0..=FALLBACK_WARMUP_FRAMES {
+            watch.busy += 0.100;
+            assert!(!watch.note_frame(Some(frame as f64 * 0.04)));
+        }
+        // 窗口 50 帧 ≈ 2s：0.100s/帧忙时 → 5s ≫ 2.3s，触发
+        let mut triggered = false;
+        for frame in FALLBACK_WARMUP_FRAMES + 1..=FALLBACK_WARMUP_FRAMES + 60 {
+            watch.busy += 0.100;
+            if watch.note_frame(Some(frame as f64 * 0.04)) {
+                triggered = true;
+                break;
+            }
+        }
+        assert!(triggered, "持续 2.5× 超预算必须触发回退");
+        assert!(!watch.note_frame(Some(99.0)), "回退只触发一次");
+
+        // 忙时 50% 预算：一直不触发
+        let mut watch = FallbackWatch::new(Some(ffmpeg_next::codec::Parameters::new()));
+        for frame in 0..400 {
+            watch.busy += 0.020;
+            assert!(!watch.note_frame(Some(frame as f64 * 0.04)));
+        }
+
+        // 没有流参数（软解 / 显式设备）就不回退
+        let mut watch = FallbackWatch::new(None);
+        for frame in 0..400 {
+            watch.busy += 0.100;
+            assert!(!watch.note_frame(Some(frame as f64 * 0.04)));
+        }
     }
 }

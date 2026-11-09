@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender};
 use dyl_ffmpeg::{AudioDecoder, AudioFrame, Packet, VideoDecoder, VideoFrame};
 
+use crate::event::PipelineEvent;
 use crate::pipeline::Pipeline;
 use crate::seek::{recv_current, Stamped};
 
@@ -217,6 +218,16 @@ pub fn video_decode_loop(
                             break;
                         }
                     }
+                }
+                // 解码器可能在运行中回退软解（自动策略下硬解吞吐不足）。
+                // 事件只报一次；快照后端跟着解码器的真实状态走
+                if let Some(notice) = decoder.take_notice() {
+                    tracing::warn!("video decoder notice: {} ({})", notice.message, notice.code);
+                    pipeline.set_decode_device(decoder.hardware_device());
+                    pipeline.emit(PipelineEvent::Warning {
+                        code: notice.code.to_string(),
+                        message: notice.message,
+                    });
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,

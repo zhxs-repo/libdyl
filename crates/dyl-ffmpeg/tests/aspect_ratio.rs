@@ -10,20 +10,18 @@ use std::sync::Arc;
 use dyl_ffmpeg::hwaccel::Policy;
 use dyl_ffmpeg::{Demuxer, FfmpegDemuxer, FfmpegVideoDecoder, TrackSelection, VideoDecoder};
 
-fn sar_asset() -> String {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../sar_9x16.mp4")
-        .to_string_lossy()
-        .to_string()
-}
+mod common;
 
 #[test]
 fn anamorphic_stream_and_frame_report_display_dimensions() {
+    let Some(path) = common::asset_or_skip("sar_9x16.mp4", common::HOW_SAR) else {
+        return;
+    };
     ffmpeg_next::init().expect("ffmpeg init");
     let mut demuxer = FfmpegDemuxer::new();
     demuxer
         .open(
-            &sar_asset(),
+            &path,
             &TrackSelection::default(),
             Arc::new(AtomicBool::new(false)),
         )
@@ -45,6 +43,18 @@ fn anamorphic_stream_and_frame_report_display_dimensions() {
     let mut decoded = None;
     while decoded.is_none() {
         let Some(packet) = demuxer.read_packet().expect("read packet") else {
+            // 帧线程会把不满一个线程组的短素材全部压在解码器里，必须送 EOF
+            // 才会吐出；10 帧的样片在 threads=auto 下正是这种情况
+            decoder.send_eof().expect("send eof");
+            while decoded.is_none() {
+                match decoder.receive_frame() {
+                    Ok(Some(frame)) => {
+                        decoded = Some(frame);
+                    }
+                    // FFmpeg 在真正排空后以 AVERROR_EOF 结束
+                    Ok(None) | Err(_) => break,
+                }
+            }
             break;
         };
         if packet.stream_index != video_idx {

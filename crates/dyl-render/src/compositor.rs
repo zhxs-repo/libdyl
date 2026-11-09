@@ -473,6 +473,7 @@ mod tests {
             color_space: ColorSpace::Unspecified,
             color_primaries: ColorPrimaries::Unspecified,
             color_range: ColorRange::Unspecified,
+            color_transfer: dyl_ffmpeg::ColorTransfer::Sdr,
             planes: vec![],
             pts,
             time_base: dyl_ffmpeg::time_base(1, 1000),

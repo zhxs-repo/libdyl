@@ -110,8 +110,8 @@ impl ControlState {
             position_ms: 0,
             volume: 100,
             muted: false,
-            // 默认软解：与硬解接入前的行为逐字节一致，用户显式切到 auto 才试硬件
-            decode_mode: DecodeMode::Software,
+            // 默认 `auto`：硬解优先、失败或平台未实测回退软解（映射见 load.rs）
+            decode_mode: DecodeMode::Auto,
             subtitle_visible: true,
             danmaku_visible: true,
             danmaku_opacity: 100,
@@ -333,7 +333,7 @@ impl ControlState {
             self.complete_ok(request_id, CommandOp::Pause);
             return;
         }
-        let position_ms = self.live_position_ms();
+        let position_ms = self.pinned_position_ms();
         if let Some(pipeline) = &self.pipeline {
             pipeline.pause();
         }
@@ -390,7 +390,7 @@ impl ControlState {
                     self.complete_error(request_id, op, &error);
                     return;
                 };
-                let from_ms = self.live_position_ms();
+                let from_ms = self.pinned_position_ms();
                 if let Some(previous) = self.pending_seek.take() {
                     self.superseded_seeks.push(previous);
                 }
@@ -517,7 +517,7 @@ impl ControlState {
         // ended/stopped 的位置就是终点，重开只回到 0 才合理（与 play 重启同义）
         let (resume, position_ms) = match self.state {
             PlayerState::Ended | PlayerState::Stopped => (PlayerState::Paused, 0),
-            current => (current, self.live_position_ms()),
+            current => (current, self.pinned_position_ms()),
         };
 
         self.cancel_pending_seek(CommandStatus::Cancelled);
@@ -567,7 +567,7 @@ impl ControlState {
             return;
         };
         let resume = self.state;
-        let position_ms = self.live_position_ms();
+        let position_ms = self.pinned_position_ms();
 
         self.cancel_pending_seek(CommandStatus::Cancelled);
         self.cancel_pending_restart(CommandStatus::Superseded);
@@ -872,6 +872,7 @@ impl ControlState {
                 tag, position_secs, ..
             } => self.on_seek_applied(tag, position_secs),
             PipelineEvent::SeekFailed { tag, message } => self.on_seek_failed(tag, message),
+            PipelineEvent::Warning { code, message } => self.on_pipeline_warning(code, message),
             PipelineEvent::Error { code, message } => self.on_pipeline_error(code, message),
         }
     }
@@ -946,6 +947,13 @@ impl ControlState {
         let error = EngineError::new(ErrorCode::Pipeline, message);
         self.complete_error(pending.request_id, pending.op, &error);
         self.flush_superseded();
+    }
+
+    /// 非致命告警：解码器运行中回退软解等，播放继续，只通知并刷新快照
+    fn on_pipeline_warning(&mut self, code: String, message: String) {
+        self.events.emit(Event::Warning(Warning { code, message }));
+        // 解码后端可能在告警之前刚变了（硬解 → 软解），快照必须说真话
+        self.publish();
     }
 
     fn on_pipeline_error(&mut self, code: ErrorCode, message: String) {
@@ -1065,6 +1073,16 @@ impl ControlState {
             .unwrap_or(self.position_ms)
     }
 
+    /// 对外位置：重开后的位置钉未落地时不能读新管线（它还没出画面，live 是 0），
+    /// 否则连续两次重开（如快切两次解码方式）会把恢复位置从钉住的进度改成 0
+    fn pinned_position_ms(&self) -> u64 {
+        if self.pending_switch.is_some() {
+            self.position_ms
+        } else {
+            self.live_position_ms()
+        }
+    }
+
     fn seek_target(&self, position_ms: Option<u64>, delta_ms: Option<i64>) -> u64 {
         let upper: i128 = if self.duration_ms > 0 {
             self.duration_ms as i128
@@ -1073,7 +1091,7 @@ impl ControlState {
         };
         let raw: i128 = match (position_ms, delta_ms) {
             (Some(position), _) => position as i128,
-            (None, Some(delta)) => self.live_position_ms() as i128 + delta as i128,
+            (None, Some(delta)) => self.pinned_position_ms() as i128 + delta as i128,
             _ => 0,
         };
         raw.clamp(0, upper) as u64
@@ -1121,7 +1139,7 @@ impl ControlState {
             .as_ref()
             .and_then(|pipeline| pipeline.decode_device())
         {
-            Some(device) => (DecodeBackend::Hardware, Some(device.to_string())),
+            Some(device) => (DecodeBackend::Hardware, Some(device)),
             None => (DecodeBackend::Software, None),
         };
         let snapshot = Snapshot {

@@ -236,7 +236,7 @@ fn settings_and_surface_sequences_are_complete_objects() {
     };
     assert_eq!(changed.volume, 80);
     assert!(changed.muted);
-    assert_eq!(changed.decode_mode, DecodeMode::Software);
+    assert_eq!(changed.decode_mode, DecodeMode::Auto);
     assert_eq!(changed.danmaku_opacity, 80);
     let Event::CommandCompleted(done) = &settings[1].event else {
         panic!();
@@ -270,7 +270,7 @@ fn snapshots_round_trip_and_match_semantics() {
     assert_eq!((idle.surface.width, idle.surface.height), (0, 0));
     assert!(!idle.subtitle.loaded);
     assert_eq!(idle.danmaku.count, 0);
-    assert_eq!(idle.decode.mode, DecodeMode::Software);
+    assert_eq!(idle.decode.mode, DecodeMode::Auto);
     assert_eq!(idle.decode.backend, DecodeBackend::Software);
     assert!(idle.decode.device.is_none());
 

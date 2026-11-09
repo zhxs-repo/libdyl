@@ -95,7 +95,9 @@ pub enum SeekMode {
     Keyframe,
 }
 
-/// 解码方式：`software` 只用 CPU，`auto` 在能力位允许时优先硬件、失败回落 CPU。
+/// 解码方式（默认 `auto`）：`software` 只用 CPU；`auto` 优先硬件、设备不可用
+/// 或平台未实测硬解时回退 CPU。未实测平台接受命令但不尝试硬件，快照
+/// `decode.backend` 如实报 `software`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecodeMode {

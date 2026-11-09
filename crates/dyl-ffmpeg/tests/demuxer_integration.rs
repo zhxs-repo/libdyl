@@ -12,33 +12,37 @@ fn running() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
-/// 工作区根目录下的样例文件（相对 manifest 定位，避免绝对路径）
-fn sample_video() -> String {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test_video.mp4")
-        .to_string_lossy()
-        .to_string()
+mod common;
+
+/// 资产位置由 common 统一解析：CI 在仓库根生成，本机按约定放 tmp_verify/
+fn sample_video() -> Option<String> {
+    common::asset_or_skip("test_video.mp4", common::HOW_TEST_VIDEO)
 }
 
-fn open_sample(selection: &TrackSelection) -> MediaInfo {
+fn open_sample(selection: &TrackSelection) -> Option<MediaInfo> {
+    let path = sample_video()?;
     ffmpeg_next::init().expect("ffmpeg init");
     let mut demuxer = FfmpegDemuxer::new();
     demuxer
-        .open(&sample_video(), selection, running())
+        .open(&path, selection, running())
         .expect("open test_video.mp4");
-    demuxer.info().cloned().expect("media info after open")
+    Some(demuxer.info().cloned().expect("media info after open"))
 }
 
 /// 切轨的实现是「带着显式索引重开」，所以重开绝不能改变画面：显式选中自动
 /// 选中的那几条时，视频/音频参数与 selected 标记必须与自动选择完全一致
 #[test]
 fn explicit_selection_reproduces_auto_selection() {
-    let auto = open_sample(&TrackSelection::default());
-    let forced = open_sample(&TrackSelection {
+    let Some(auto) = open_sample(&TrackSelection::default()) else {
+        return;
+    };
+    let Some(forced) = open_sample(&TrackSelection {
         video: auto.video_stream_index,
         audio: auto.audio_stream_index,
         subtitle: auto.subtitle_stream_index,
-    });
+    }) else {
+        return;
+    };
 
     assert_eq!(forced.video_stream_index, auto.video_stream_index);
     assert_eq!(forced.audio_stream_index, auto.audio_stream_index);
@@ -62,32 +66,41 @@ fn explicit_selection_reproduces_auto_selection() {
 /// 指到别的类型的流必须报错，不能让内核擅自改选一条（那会把画面换掉）
 #[test]
 fn explicit_selection_rejects_stream_of_the_other_kind() {
-    let auto = open_sample(&TrackSelection::default());
+    let Some(auto) = open_sample(&TrackSelection::default()) else {
+        return;
+    };
     let video = auto.video_stream_index.expect("sample has a video stream");
-    let err = open_sample_err(TrackSelection {
+    let Some(err) = open_sample_err(TrackSelection {
         video: None,
         audio: Some(video),
         subtitle: None,
-    });
+    }) else {
+        return;
+    };
     assert!(matches!(err, DylError::InvalidArgument(_)), "{err}");
 }
 
 #[test]
 fn explicit_selection_rejects_stream_that_is_not_in_the_file() {
-    let err = open_sample_err(TrackSelection {
+    let Some(err) = open_sample_err(TrackSelection {
         video: None,
         audio: Some(9_999),
         subtitle: None,
-    });
+    }) else {
+        return;
+    };
     assert!(matches!(err, DylError::InvalidArgument(_)), "{err}");
 }
 
-fn open_sample_err(selection: TrackSelection) -> DylError {
+fn open_sample_err(selection: TrackSelection) -> Option<DylError> {
+    let path = sample_video()?;
     ffmpeg_next::init().expect("ffmpeg init");
     let mut demuxer = FfmpegDemuxer::new();
-    demuxer
-        .open(&sample_video(), &selection, running())
-        .expect_err("selection must be rejected")
+    Some(
+        demuxer
+            .open(&path, &selection, running())
+            .expect_err("selection must be rejected"),
+    )
 }
 
 /// Path to the h264 reference file in the Erika third_party directory

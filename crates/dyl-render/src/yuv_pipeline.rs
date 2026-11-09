@@ -5,7 +5,7 @@
 
 use dyl_ffmpeg::VideoFrame;
 
-/// `ColorParams` uniform 的字节数（matrix + full_range + 8 字节填充）
+/// `ColorParams` uniform 的字节数（matrix + full_range + transfer + primaries）
 const COLOR_PARAMS_SIZE: u64 = 16;
 
 /// 由帧的色彩元数据生成 uniform 内容
@@ -15,9 +15,13 @@ const COLOR_PARAMS_SIZE: u64 = 16;
 pub(crate) fn color_params_bytes(frame: &VideoFrame) -> [u8; COLOR_PARAMS_SIZE as usize] {
     let matrix = frame.yuv_matrix().shader_index().to_ne_bytes();
     let full = u32::from(frame.is_full_range()).to_ne_bytes();
+    let transfer = frame.color_transfer.shader_index().to_ne_bytes();
+    let primaries = frame.color_primaries.shader_index().to_ne_bytes();
     let mut bytes = [0u8; COLOR_PARAMS_SIZE as usize];
     bytes[0..4].copy_from_slice(&matrix);
     bytes[4..8].copy_from_slice(&full);
+    bytes[8..12].copy_from_slice(&transfer);
+    bytes[12..16].copy_from_slice(&primaries);
     bytes
 }
 
@@ -251,18 +255,21 @@ mod tests {
             color_space: space,
             color_primaries: ColorPrimaries::Unspecified,
             color_range: range,
+            color_transfer: dyl_ffmpeg::ColorTransfer::Sdr,
             planes: vec![],
         }
     }
 
-    /// uniform 布局是 Rust ↔ WGSL 的约定：matrix 在 [0..4]、full_range 在 [4..8]
+    /// uniform 布局是 Rust ↔ WGSL 的约定：matrix / full_range / transfer /
+    /// primaries 各占 4 字节
     #[test]
     fn color_params_bytes_layout() {
         let bytes = color_params_bytes(&frame(ColorSpace::Bt709, ColorRange::Full, 1920, 1080));
         assert_eq!(bytes.len(), 16);
         assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 1);
         assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 1);
-        assert!(bytes[8..].iter().all(|&b| b == 0));
+        assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 0);
+        assert_eq!(u32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 0);
 
         // 未标注：矩阵走分辨率回退，量程走 limited
         let sd = color_params_bytes(&frame(
@@ -273,6 +280,16 @@ mod tests {
         ));
         assert_eq!(u32::from_ne_bytes(sd[0..4].try_into().unwrap()), 0);
         assert_eq!(u32::from_ne_bytes(sd[4..8].try_into().unwrap()), 0);
+
+        // HDR10：PQ + BT.2020 必须分别落到 transfer/primaries 槽位
+        let mut hdr = frame(ColorSpace::Bt2020, ColorRange::Limited, 3840, 1608);
+        hdr.color_primaries = ColorPrimaries::Bt2020;
+        hdr.color_transfer = dyl_ffmpeg::ColorTransfer::Pq;
+        let bytes = color_params_bytes(&hdr);
+        assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 2);
+        assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 1);
+        assert_eq!(u32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 2);
     }
 
     #[test]
@@ -281,6 +298,19 @@ mod tests {
         let v = vec![50u8, 60, 70, 80];
         let result = interleave_uv_planes(&u, 2, &v, 2, 2, 2);
         assert_eq!(result, vec![10, 50, 20, 60, 30, 70, 40, 80]);
+    }
+
+    /// WGSL 只有创建 pipeline 时才编译，CI 的无 GPU runner 跑不到那一步；
+    /// 用 naga 直接解析 + 校验源码，把语法/类型错误挡在门禁里
+    #[test]
+    fn yuv_shader_parses_and_validates() {
+        let source = include_str!("shader/yuv_to_rgb.wgsl");
+        let module = naga::front::wgsl::parse_str(source).expect("WGSL 必须能被解析");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).expect("WGSL 模块必须通过校验");
     }
 
     #[test]

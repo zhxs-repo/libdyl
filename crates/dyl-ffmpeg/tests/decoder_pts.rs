@@ -9,36 +9,31 @@ use dyl_ffmpeg::{
     AudioDecoder, Demuxer, FfmpegAudioDecoder, FfmpegDemuxer, FfmpegVideoDecoder, Packet,
     TrackSelection, VideoDecoder,
 };
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// 工作区根目录下的样例文件（相对 manifest 定位，避免绝对路径）
-fn sample_video() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_video.mp4")
-}
+mod common;
 
-fn open_sample() -> FfmpegDemuxer {
+fn open_sample() -> Option<FfmpegDemuxer> {
+    let path = common::asset_or_skip("test_video.mp4", common::HOW_TEST_VIDEO)?;
     ffmpeg_next::init().expect("ffmpeg init");
-    let path = sample_video();
-    if !path.exists() {
-        panic!("sample file missing: {}", path.display());
-    }
     let mut demuxer = FfmpegDemuxer::new();
     demuxer
         .open(
-            &path.to_string_lossy(),
+            &path,
             &TrackSelection::default(),
             Arc::new(AtomicBool::new(false)),
         )
         .expect("open sample file");
-    demuxer
+    Some(demuxer)
 }
 
 /// 时间基有效时，Packet 的 tick 与秒必须一一对应；NOPTS 必须保持 None
 #[test]
 fn demuxer_preserves_ticks_and_nopts() {
-    let mut demuxer = open_sample();
+    let Some(mut demuxer) = open_sample() else {
+        return;
+    };
     let info = demuxer.info().cloned().unwrap();
     let audio_idx = info.audio_stream_index.expect("sample has audio stream");
 
@@ -82,7 +77,9 @@ fn demuxer_preserves_ticks_and_nopts() {
 /// 增量仍必须等于帧内采样数 / 采样率
 #[test]
 fn audio_frame_pts_follows_packet_timebase() {
-    let mut demuxer = open_sample();
+    let Some(mut demuxer) = open_sample() else {
+        return;
+    };
     let info = demuxer.info().cloned().unwrap();
     let audio_idx = info.audio_stream_index.unwrap();
     let sample_rate = info.sample_rate;
@@ -159,7 +156,9 @@ fn audio_frame_pts_follows_packet_timebase() {
 /// （旧实现把 avctx.pkt_timebase 缺失时硬编码为 1/90000，换算出的秒数是错的）
 #[test]
 fn video_frame_pts_inherits_packet_timebase() {
-    let mut demuxer = open_sample();
+    let Some(mut demuxer) = open_sample() else {
+        return;
+    };
     let info = demuxer.info().cloned().unwrap();
     let video_idx = info.video_stream_index.unwrap();
 

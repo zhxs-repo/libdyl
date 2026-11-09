@@ -89,7 +89,7 @@ impl EngineShared {
             volume: 100,
             muted: false,
             decode: DecodeSnapshot {
-                mode: DecodeMode::Software,
+                mode: DecodeMode::Auto,
                 backend: DecodeBackend::Software,
                 device: None,
             },
@@ -516,14 +516,9 @@ fn validate(command: &Command) -> Result<(), EngineError> {
             ErrorCode::NotSupported,
             "select_track kind video is not implemented",
         )),
-        // `auto` 是静态能力（`features.hw_decode`）：没有实测过硬解的平台在同步阶段
-        // 拒绝，客户端因此不会摆出一个切过去也永远软解的开关。`software` 永远可用。
-        Command::SetDecodeMode {
-            mode: DecodeMode::Auto,
-        } if !dyl_ffmpeg::capabilities::HW_DECODE_VERIFIED => Err(EngineError::new(
-            ErrorCode::NotSupported,
-            "hardware decoding is not verified on this platform",
-        )),
+        // `auto` 在任何平台都被接受：它的语义是"硬解优先，不支持就软解"。
+        // 未实测平台（`features.hw_decode=false`）由 load.rs 直接映射成软解策略，
+        // 快照照常报告请求值 `auto` 与实际后端 `software`
         _ => Ok(()),
     }
 }

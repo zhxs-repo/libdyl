@@ -1,9 +1,10 @@
-//! `set_decode_mode` 回归 — 快照默认值、同步能力门与切解码方式的重开语义。
+//! `set_decode_mode` 回归 — 快照默认值、`auto` 的普适接受与切解码方式的重开语义。
 //!
-//! 真实文件部分用 `libdyl/test_video.mp4`（工作区自带）；切到 `auto` 在未实测平台
-//! 会被同步拒绝，所以重开测试只在 Windows 上编译。断言不要求这台机器真有可用
-//! 硬件：没有设备时 FFmpeg 自己回退软解，测试只钉住"backend 与 device 一致、
-//! 位置不回跳、只发一个 command_completed"这些与设备无关的性质。
+//! 真实文件部分用 `libdyl/test_video.mp4`（工作区自带）。`auto` 在所有平台都被
+//! 接受（硬解优先、失败/未实测回退软解），所以重开测试只在 Windows 上编译——
+//! 那里 `auto` 会真的尝试设备。断言不要求这台机器真有可用硬件：没有设备时
+//! FFmpeg 自己回退软解，测试只钉住"backend 与 device 一致、位置不回跳、只发一个
+//! command_completed"这些与设备无关的性质。
 
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
@@ -20,10 +21,13 @@ use dyl_engine::Engine;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+// 与 asset_path 同 cfg：否则非 Windows 上这个辅助模块没人用，会报 dead_code
+#[cfg(target_os = "windows")]
+mod common;
+
 #[cfg(target_os = "windows")]
 fn asset_path() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_video.mp4");
-    path.exists().then_some(path)
+    common::asset("test_video.mp4")
 }
 
 fn drain_until_completed(
@@ -56,17 +60,18 @@ fn flush(rx: &Receiver<EventEnvelope>) {
 }
 
 #[test]
-fn new_engine_reports_software_decode() {
+fn new_engine_defaults_to_auto_decode() {
     let (mut engine, _rx) = Engine::new().expect("engine must start");
     let snapshot = engine.snapshot();
-    assert_eq!(snapshot.decode.mode, DecodeMode::Software);
+    // 没有管线时 backend 只报软解；mode 是请求设置，默认 auto
+    assert_eq!(snapshot.decode.mode, DecodeMode::Auto);
     assert_eq!(snapshot.decode.backend, DecodeBackend::Software);
     assert!(snapshot.decode.device.is_none());
     engine.destroy();
 }
 
 #[test]
-fn software_mode_is_idempotent_and_never_reopens() {
+fn software_mode_without_pipeline_only_persists() {
     let (mut engine, rx) = Engine::new().expect("engine must start");
     engine
         .command(CommandEnvelope::with_request_id(
@@ -83,27 +88,49 @@ fn software_mode_is_idempotent_and_never_reopens() {
             event,
             Event::StateChanged(changed) if changed.to == PlayerState::Loading
         )),
-        "同一种解码方式不得推进 loading：{events:?}"
+        "无活管线时切解码方式不得推进 loading：{events:?}"
     );
+    assert_eq!(engine.snapshot().decode.mode, DecodeMode::Software);
     assert_eq!(engine.snapshot().state, PlayerState::Idle);
+
+    // 重设当前值幂等：不推进任何状态
+    engine
+        .command(CommandEnvelope::with_request_id(
+            2,
+            Command::SetDecodeMode {
+                mode: DecodeMode::Software,
+            },
+        ))
+        .expect("repeating the current mode is accepted");
+    let (status, events) = drain_until_completed(&rx, 2, CommandOp::SetDecodeMode);
+    assert_eq!(status, CommandStatus::Ok);
+    assert!(events.is_empty(), "幂等重设不得产生事件：{events:?}");
     engine.destroy();
 }
 
 #[cfg(not(target_os = "windows"))]
 #[test]
-fn auto_is_synchronously_rejected_without_verified_hardware() {
+fn auto_is_accepted_and_falls_back_to_software() {
     let (mut engine, rx) = Engine::new().expect("engine must start");
-    let error = engine
+    engine
         .command(CommandEnvelope::with_request_id(
             2,
             Command::SetDecodeMode {
                 mode: DecodeMode::Auto,
             },
         ))
-        .expect_err("auto is not a declared capability on this platform");
-    assert_eq!(error.code, dyl_core::contract::ErrorCode::NotSupported);
-    assert!(rx.try_recv().is_err(), "同步拒绝不得产生任何事件");
-    assert_eq!(engine.snapshot().decode.mode, DecodeMode::Software);
+        .expect("auto is accepted on every platform (hardware is merely not attempted)");
+    let (status, events) = drain_until_completed(&rx, 2, CommandOp::SetDecodeMode);
+    assert_eq!(status, CommandStatus::Ok, "{events:?}");
+    assert_eq!(engine.snapshot().decode.mode, DecodeMode::Auto);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::StateChanged(changed) if changed.to == PlayerState::Loading
+        )),
+        "无活管线时切解码方式不得推进 loading：{events:?}"
+    );
+    assert_eq!(engine.snapshot().decode.backend, DecodeBackend::Software);
     engine.destroy();
 }
 
@@ -156,28 +183,33 @@ fn load_and_play(
     }
 }
 
-/// 播放中切 `auto`：必须重开管线、落回 playing，且不重发 `file_loaded`。
-/// 硬件是否真的可用不在这里断言——没有设备时 FFmpeg 回退软解，此时
-/// `backend` 必须是 software 且 `device` 为空。
+/// 播放中切解码方式：默认 `auto` 下先切 `software`、再切回 `auto`，两次都必须
+/// 重开管线、落回 playing，且不重发 `file_loaded`。硬件是否真的可用不在这里
+/// 断言——没有设备时 FFmpeg 回退软解，此时 `backend` 必须是 software 且
+/// `device` 为空。
 #[cfg(target_os = "windows")]
 #[test]
 fn switching_decode_while_playing_keeps_the_position_and_events_unique() {
     let Some(asset) = asset_path() else {
-        eprintln!("SKIP: test_video.mp4 不存在");
+        eprintln!(
+            "SKIP: test_video.mp4 不存在（根目录或 tmp_verify/，可用 DYL_TEST_ASSET_DIR 指定）"
+        );
         return;
     };
     let (mut engine, rx) = Engine::new().expect("engine must start");
+    assert_eq!(engine.snapshot().decode.mode, DecodeMode::Auto);
     let before_position = load_and_play(&mut engine, &rx, &asset);
     flush(&rx);
 
+    // 默认就是 auto：先切 software，验证重开语义
     engine
         .command(CommandEnvelope::with_request_id(
             3,
             Command::SetDecodeMode {
-                mode: DecodeMode::Auto,
+                mode: DecodeMode::Software,
             },
         ))
-        .expect("auto is a declared capability on Windows");
+        .expect("software is always accepted");
 
     let mut saw_loading = 0;
     let mut landed = None;
@@ -209,7 +241,21 @@ fn switching_decode_while_playing_keeps_the_position_and_events_unique() {
             StateChangeReason::Restart
         )
     );
+    assert_eq!(engine.snapshot().decode.mode, DecodeMode::Software);
+    assert_eq!(engine.snapshot().decode.backend, DecodeBackend::Software);
+    assert!(engine.snapshot().decode.device.is_none());
 
+    // 再切回 auto：重开一次，实际后端必须自洽（有设备才报 hardware）
+    engine
+        .command(CommandEnvelope::with_request_id(
+            4,
+            Command::SetDecodeMode {
+                mode: DecodeMode::Auto,
+            },
+        ))
+        .expect("auto is a declared capability on Windows");
+    let (status, events) = drain_until_completed(&rx, 4, CommandOp::SetDecodeMode);
+    assert_eq!(status, CommandStatus::Ok, "{events:?}");
     let snapshot = engine.snapshot();
     assert_eq!(snapshot.decode.mode, DecodeMode::Auto);
     eprintln!(
@@ -248,23 +294,7 @@ fn switching_decode_while_playing_keeps_the_position_and_events_unique() {
         final_position >= before_position.saturating_sub(100),
         "切解码方式后最终位置 {final_position}ms 回跳到 before_position {before_position}ms 以下：{positions:?}"
     );
-
-    // 再切回 software：实际后端必须立刻回到 software
-    engine
-        .command(CommandEnvelope::with_request_id(
-            4,
-            Command::SetDecodeMode {
-                mode: DecodeMode::Software,
-            },
-        ))
-        .expect("switching back to software is accepted");
-    let (status, _events) = drain_until_completed(&rx, 4, CommandOp::SetDecodeMode);
-    assert_eq!(status, CommandStatus::Ok);
-    let snapshot = engine.snapshot();
-    assert_eq!(snapshot.decode.mode, DecodeMode::Software);
-    assert_eq!(snapshot.decode.backend, DecodeBackend::Software);
-    assert!(snapshot.decode.device.is_none());
-    assert_eq!(snapshot.state, PlayerState::Playing);
+    assert_eq!(engine.snapshot().state, PlayerState::Playing);
     engine.destroy();
 }
 
@@ -274,7 +304,9 @@ fn switching_decode_while_playing_keeps_the_position_and_events_unique() {
 #[test]
 fn decode_mode_is_only_persisted_when_no_pipeline_is_alive() {
     let Some(asset) = asset_path() else {
-        eprintln!("SKIP: test_video.mp4 不存在");
+        eprintln!(
+            "SKIP: test_video.mp4 不存在（根目录或 tmp_verify/，可用 DYL_TEST_ASSET_DIR 指定）"
+        );
         return;
     };
     let (mut engine, rx) = Engine::new().expect("engine must start");
@@ -292,7 +324,7 @@ fn decode_mode_is_only_persisted_when_no_pipeline_is_alive() {
         .command(CommandEnvelope::with_request_id(
             6,
             Command::SetDecodeMode {
-                mode: DecodeMode::Auto,
+                mode: DecodeMode::Software,
             },
         ))
         .expect("setting a decode mode without a pipeline is accepted");
@@ -307,7 +339,7 @@ fn decode_mode_is_only_persisted_when_no_pipeline_is_alive() {
     );
     let snapshot = engine.snapshot();
     assert_eq!(snapshot.state, PlayerState::Stopped);
-    assert_eq!(snapshot.decode.mode, DecodeMode::Auto);
+    assert_eq!(snapshot.decode.mode, DecodeMode::Software);
     assert_eq!(snapshot.decode.backend, DecodeBackend::Software);
 
     engine
@@ -317,10 +349,12 @@ fn decode_mode_is_only_persisted_when_no_pipeline_is_alive() {
     assert_eq!(status, CommandStatus::Ok);
     let snapshot = engine.snapshot();
     assert_eq!(snapshot.state, PlayerState::Playing);
-    assert_eq!(snapshot.decode.mode, DecodeMode::Auto);
-    match snapshot.decode.backend {
-        DecodeBackend::Hardware => assert!(snapshot.decode.device.is_some()),
-        DecodeBackend::Software => assert!(snapshot.decode.device.is_none()),
-    }
+    assert_eq!(snapshot.decode.mode, DecodeMode::Software);
+    assert_eq!(
+        snapshot.decode.backend,
+        DecodeBackend::Software,
+        "设置的是 software，重启后的实际后端必须是软解"
+    );
+    assert!(snapshot.decode.device.is_none());
     engine.destroy();
 }

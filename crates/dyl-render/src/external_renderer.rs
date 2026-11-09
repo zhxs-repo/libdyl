@@ -904,6 +904,7 @@ mod tests {
             color_space: dyl_ffmpeg::ColorSpace::Unspecified,
             color_primaries: dyl_ffmpeg::ColorPrimaries::Unspecified,
             color_range: dyl_ffmpeg::ColorRange::Unspecified,
+            color_transfer: dyl_ffmpeg::ColorTransfer::Sdr,
             planes: vec![],
             pts: Some(0),
             time_base: dyl_ffmpeg::time_base(1, 90000),

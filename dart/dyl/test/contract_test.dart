@@ -233,7 +233,7 @@ void main() {
       final changed = settings[0].event as SettingsChangedEvent;
       expect(changed.volume, 80);
       expect(changed.muted, isTrue);
-      expect(changed.decodeMode, DecodeMode.software);
+      expect(changed.decodeMode, DecodeMode.auto);
       expect(changed.danmakuOpacity, 80);
       final done = settings[1].event as CommandCompletedEvent;
       expect(done.op, CommandOp.setMute);
@@ -272,7 +272,7 @@ void main() {
       expect(idle.surface.width, 0);
       expect(idle.subtitle.loaded, isFalse);
       expect(idle.danmaku.count, 0);
-      expect(idle.decode.mode, DecodeMode.software);
+      expect(idle.decode.mode, DecodeMode.auto);
       expect(idle.decode.backend, DecodeBackend.software);
       expect(idle.decode.device, isNull);
     });

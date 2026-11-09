@@ -20,3 +20,9 @@ dart/dyl_flutter/example/android/app/release/
 
 # Cross-compiled cdylib, dropped in by scripts/build_android_lib.sh (~28 MB).
 dart/dyl_flutter/example/android/app/src/main/jniLibs/
+
+# agent
+AGENTS.md
+dev_docs/
+tmp_verify/
+dist/

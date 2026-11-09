@@ -6,7 +6,7 @@
     "data": {
       "volume": 80,
       "muted": true,
-      "decode_mode": "software",
+      "decode_mode": "auto",
       "subtitle_visible": true,
       "danmaku_visible": true,
       "danmaku_opacity": 80

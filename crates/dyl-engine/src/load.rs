@@ -235,8 +235,14 @@ fn video_codec_name(codec: Option<VideoCodecId>) -> &'static str {
 
 fn decode_policy(mode: DecodeMode) -> dyl_ffmpeg::hwaccel::Policy {
     match mode {
-        DecodeMode::Software => dyl_ffmpeg::hwaccel::Policy::SoftwareOnly,
-        DecodeMode::Auto => dyl_ffmpeg::hwaccel::Policy::Auto,
+        // `auto` = 硬解优先、建不出设备/解码器不支持就软解。设备枚举与回退都在
+        // `hwaccel::select` 里，这里只决定要不要去试：未实测平台
+        //（`features.hw_decode=false`）一条硬解通路都没验收过，`auto` 在那里
+        // 等价于软解——快照的 `mode` 仍报请求值，`backend` 报实际
+        DecodeMode::Auto if dyl_ffmpeg::capabilities::HW_DECODE_VERIFIED => {
+            dyl_ffmpeg::hwaccel::Policy::Auto
+        }
+        DecodeMode::Software | DecodeMode::Auto => dyl_ffmpeg::hwaccel::Policy::SoftwareOnly,
     }
 }
 
