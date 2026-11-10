@@ -93,7 +93,13 @@ enum CommandOp {
   setDanmakuOpacity('set_danmaku_opacity'),
   loadDanmaku('load_danmaku'),
   selectTrack('select_track'),
-  setDecodeMode('set_decode_mode');
+  setDecodeMode('set_decode_mode'),
+  setSpeed('set_speed'),
+  screenshot('screenshot'),
+  setSubtitleDelay('set_subtitle_delay'),
+  setAudioDelay('set_audio_delay'),
+  setAbLoop('set_ab_loop'),
+  seekChapter('seek_chapter');
 
   const CommandOp(this.wire);
 
@@ -132,6 +138,50 @@ enum SurfaceKind {
 
   static SurfaceKind fromWire(String wire) =>
       _enumFromWire(values, (v) => v.wire, wire, 'surface kind');
+}
+
+/// AB 循环区间。播放到 `b_ms` 时自动跳回 `a_ms`。
+class AbLoop {
+  const AbLoop({required this.aMs, required this.bMs});
+
+  factory AbLoop.fromJson(Map<String, dynamic> json) => AbLoop(
+        aMs: _int(json['a_ms']),
+        bMs: _int(json['b_ms']),
+      );
+
+  final int aMs;
+  final int bMs;
+
+  Map<String, dynamic> toJson() => {'a_ms': aMs, 'b_ms': bMs};
+}
+
+/// 章节标记。
+class Chapter {
+  const Chapter({
+    required this.index,
+    required this.startMs,
+    required this.endMs,
+    this.title,
+  });
+
+  factory Chapter.fromJson(Map<String, dynamic> json) => Chapter(
+        index: _int(json['index']),
+        title: json['title'] as String?,
+        startMs: _int(json['start_ms']),
+        endMs: _int(json['end_ms']),
+      );
+
+  final int index;
+  final String? title;
+  final int startMs;
+  final int endMs;
+
+  Map<String, dynamic> toJson() => {
+        'index': index,
+        'title': title,
+        'start_ms': startMs,
+        'end_ms': endMs,
+      };
 }
 
 /// 快照中的 Surface 状态。
@@ -245,7 +295,7 @@ class AbiVersion {
         patch: _int(json['patch']),
       );
 
-  static const current = AbiVersion(major: 0, minor: 6, patch: 0);
+  static const current = AbiVersion(major: 0, minor: 7, patch: 0);
 
   final int major;
   final int minor;
@@ -415,11 +465,16 @@ class Snapshot {
     required this.durationMs,
     required this.volume,
     required this.muted,
+    required this.speed,
     required this.decode,
     required this.source,
     required this.media,
     required this.subtitle,
+    required this.subtitleDelayMs,
+    required this.audioDelayMs,
     required this.danmaku,
+    required this.abLoop,
+    required this.chapters,
     required this.surface,
     required this.stats,
     required this.lastError,
@@ -433,6 +488,7 @@ class Snapshot {
         durationMs: _int(json['duration_ms']),
         volume: _int(json['volume']),
         muted: json['muted'] as bool,
+        speed: _double(json['speed']),
         decode: DecodeSnapshot.fromJson(
           json['decode'] as Map<String, dynamic>,
         ),
@@ -443,9 +499,18 @@ class Snapshot {
         subtitle: SubtitleSnapshot.fromJson(
           json['subtitle'] as Map<String, dynamic>,
         ),
+        subtitleDelayMs: _int(json['subtitle_delay_ms']),
+        audioDelayMs: _int(json['audio_delay_ms']),
         danmaku: DanmakuSnapshot.fromJson(
           json['danmaku'] as Map<String, dynamic>,
         ),
+        abLoop: json['ab_loop'] == null
+            ? null
+            : AbLoop.fromJson(json['ab_loop'] as Map<String, dynamic>),
+        chapters: (json['chapters'] as List<dynamic>? ?? const [])
+            .cast<Map<String, dynamic>>()
+            .map(Chapter.fromJson)
+            .toList(),
         surface: SurfaceSnapshot.fromJson(
           json['surface'] as Map<String, dynamic>,
         ),
@@ -465,11 +530,16 @@ class Snapshot {
   final int durationMs;
   final int volume;
   final bool muted;
+  final double speed;
   final DecodeSnapshot decode;
   final String? source;
   final MediaInfo? media;
   final SubtitleSnapshot subtitle;
+  final int subtitleDelayMs;
+  final int audioDelayMs;
   final DanmakuSnapshot danmaku;
+  final AbLoop? abLoop;
+  final List<Chapter> chapters;
   final SurfaceSnapshot surface;
   final StatsSnapshot stats;
   final ErrorInfo? lastError;
@@ -481,11 +551,16 @@ class Snapshot {
         'duration_ms': durationMs,
         'volume': volume,
         'muted': muted,
+        'speed': speed,
         'decode': decode.toJson(),
         'source': source,
         'media': media?.toJson(),
         'subtitle': subtitle.toJson(),
+        'subtitle_delay_ms': subtitleDelayMs,
+        'audio_delay_ms': audioDelayMs,
         'danmaku': danmaku.toJson(),
+        'ab_loop': abLoop?.toJson(),
+        'chapters': chapters.map((chapter) => chapter.toJson()).toList(),
         'surface': surface.toJson(),
         'stats': stats.toJson(),
         'last_error': lastError?.toJson(),

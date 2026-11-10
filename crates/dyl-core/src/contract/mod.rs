@@ -24,8 +24,9 @@ pub use event::{
 };
 pub use matrix::{MatrixCell, MatrixStatus, RejectSpec, SameTarget, StateMatrix, TransitionTarget};
 pub use snapshot::{
-    AudioStreamInfo, DanmakuSnapshot, DecodeSnapshot, MediaInfo, Snapshot, SnapshotError,
-    StatsSnapshot, SubtitleSnapshot, SurfaceSnapshot, TrackInfo, TrackKind, VideoStreamInfo,
+    AbLoop, AudioStreamInfo, Chapter, DanmakuSnapshot, DecodeSnapshot, MediaInfo, Snapshot,
+    SnapshotError, StatsSnapshot, SubtitleSnapshot, SurfaceSnapshot, TrackInfo, TrackKind,
+    VideoStreamInfo,
 };
 pub use surface::SurfaceDescriptor;
 
@@ -132,10 +133,16 @@ pub enum CommandOp {
     LoadDanmaku,
     SelectTrack,
     SetDecodeMode,
+    SetSpeed,
+    Screenshot,
+    SetSubtitleDelay,
+    SetAudioDelay,
+    SetAbLoop,
+    SeekChapter,
 }
 
 impl CommandOp {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 21] = [
         Self::LoadFile,
         Self::Play,
         Self::Pause,
@@ -151,6 +158,12 @@ impl CommandOp {
         Self::LoadDanmaku,
         Self::SelectTrack,
         Self::SetDecodeMode,
+        Self::SetSpeed,
+        Self::Screenshot,
+        Self::SetSubtitleDelay,
+        Self::SetAudioDelay,
+        Self::SetAbLoop,
+        Self::SeekChapter,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -170,6 +183,12 @@ impl CommandOp {
             Self::LoadDanmaku => "load_danmaku",
             Self::SelectTrack => "select_track",
             Self::SetDecodeMode => "set_decode_mode",
+            Self::SetSpeed => "set_speed",
+            Self::Screenshot => "screenshot",
+            Self::SetSubtitleDelay => "set_subtitle_delay",
+            Self::SetAudioDelay => "set_audio_delay",
+            Self::SetAbLoop => "set_ab_loop",
+            Self::SeekChapter => "seek_chapter",
         }
     }
 }

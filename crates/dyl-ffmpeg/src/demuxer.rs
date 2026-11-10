@@ -282,6 +282,8 @@ impl Demuxer for FfmpegDemuxer {
             })
             .collect();
 
+        let chapters = parse_chapters(&input);
+
         let info = MediaInfo {
             duration,
             video_stream_index,
@@ -301,6 +303,7 @@ impl Demuxer for FfmpegDemuxer {
             sample_format,
             tracks,
             subtitle_script,
+            chapters,
         };
 
         tracing::info!(
@@ -659,6 +662,23 @@ fn dict_text(stream: &ffmpeg_next::format::stream::Stream<'_>, key: &str) -> Opt
         return None;
     }
     Some(value.to_string())
+}
+
+fn parse_chapters(input: &ffmpeg_next::format::context::Input) -> Vec<ChapterInfo> {
+    input
+        .chapters()
+        .map(|ch| {
+            let start_ms = (ch.start() as f64 / 1_000.0) as u64;
+            let end_ms = (ch.end() as f64 / 1_000.0) as u64;
+            let title = ch.metadata().get("title").map(|s| s.to_string());
+            ChapterInfo {
+                index: ch.id() as u32,
+                title,
+                start_ms,
+                end_ms,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -352,6 +352,7 @@ mod tests {
             sample_format: SampleFormat::Unknown,
             tracks: vec![],
             subtitle_script: None,
+            chapters: vec![],
         }
     }
 

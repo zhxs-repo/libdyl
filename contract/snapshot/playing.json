@@ -5,6 +5,7 @@
   "duration_ms": 120000,
   "volume": 80,
   "muted": false,
+  "speed": 1.0,
   "decode": { "mode": "auto", "backend": "hardware", "device": "d3d11va" },
   "source": "D:\\video.mp4",
   "media": {
@@ -18,7 +19,14 @@
     ]
   },
   "subtitle": { "loaded": true, "visible": true, "source": "D:\\sub.ass" },
+  "subtitle_delay_ms": 0,
+  "audio_delay_ms": 0,
   "danmaku": { "loaded": true, "visible": true, "opacity": 100, "count": 1234, "source": "D:\\danmaku.xml" },
+  "ab_loop": null,
+  "chapters": [
+    { "index": 0, "title": "Chapter 1", "start_ms": 0, "end_ms": 60000 },
+    { "index": 1, "title": "Chapter 2", "start_ms": 60000, "end_ms": 120000 }
+  ],
   "surface": { "status": "attached", "kind": "windows_hwnd", "width": 1280, "height": 720, "scale_factor": 1.5 },
   "stats": { "rendered_frames": 123, "dropped_frames": 2 },
   "last_error": null

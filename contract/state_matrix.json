@@ -163,6 +163,66 @@
       "ended": { "status": "accepted", "to": "same" },
       "stopped": { "status": "accepted", "to": "same" },
       "error": { "status": "accepted", "to": "same" }
+    },
+    "set_speed": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "screenshot": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "rejected" },
+      "stopped": { "status": "rejected" },
+      "error": { "status": "rejected" }
+    },
+    "set_subtitle_delay": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "set_audio_delay": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "set_ab_loop": {
+      "idle": { "status": "accepted", "to": "same" },
+      "loading": { "status": "accepted", "to": "same" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "same" },
+      "stopped": { "status": "accepted", "to": "same" },
+      "error": { "status": "accepted", "to": "same" }
+    },
+    "seek_chapter": {
+      "idle": { "status": "rejected" },
+      "loading": { "status": "rejected" },
+      "ready": { "status": "accepted", "to": "same" },
+      "playing": { "status": "accepted", "to": "same" },
+      "paused": { "status": "accepted", "to": "same" },
+      "ended": { "status": "accepted", "to": "paused" },
+      "stopped": { "status": "accepted", "to": "paused" },
+      "error": { "status": "rejected" }
     }
   }
 }

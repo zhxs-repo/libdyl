@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "request_id": 124,
+  "op": "set_ab_loop",
+  "a_ms": 30000,
+  "b_ms": 90000
+}

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::clock::AudioClock;
@@ -18,15 +19,13 @@ use parking_lot::Mutex;
 pub struct CpalOutput {
     stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<VecDeque<f32>>>,
-    volume: Arc<std::sync::atomic::AtomicU32>, // 用 atomic bits 存 f32
-    sample_rate: u32,                          // 源采样率（FFmpeg 输出）
-    device_rate: u32,                          // 设备采样率（cpal 实际播放）
+    volume: Arc<std::sync::atomic::AtomicU32>,
+    sample_rate: u32,
+    device_rate: u32,
     channels: u32,
-    /// 设备声道数：ring buffer 按设备帧的交错布局存放采样，
-    /// 与源声道数不同（如单声道内容放到立体声设备）时必须展开，否则设备
-    /// 每次回调取走的帧数与写入侧记账不一致，主时钟和播放速度都会错乱
     device_channels: usize,
     clock: AudioClock,
+    speed: Arc<AtomicU32>,
 }
 
 /// Ring buffer 容量上限：约 1 秒的立体声 48kHz 采样
@@ -47,6 +46,7 @@ impl CpalOutput {
             channels: 0,
             device_channels: 0,
             clock: AudioClock::new(),
+            speed: Arc::new(AtomicU32::new(1000)),
         }
     }
 
@@ -59,10 +59,11 @@ impl CpalOutput {
     fn device_frames_for(&self, frame: &AudioFrame) -> usize {
         let ch = frame.channels.max(1) as usize;
         let src_frames = frame.samples.len() / ch;
+        let speed = self.speed.load(Ordering::Relaxed) as f64 / 1000.0;
         if self.device_rate == 0 || self.sample_rate == self.device_rate {
-            src_frames
+            (src_frames as f64 / speed).ceil() as usize
         } else {
-            let ratio = self.device_rate as f64 / self.sample_rate as f64;
+            let ratio = self.device_rate as f64 / self.sample_rate as f64 / speed;
             (src_frames as f64 * ratio).ceil() as usize
         }
     }
@@ -290,6 +291,11 @@ impl AudioOutput for CpalOutput {
 
     fn has_pending_audio(&self) -> bool {
         !self.buffer.lock().is_empty()
+    }
+
+    fn set_speed_arc(&mut self, speed: Arc<AtomicU32>) {
+        self.speed = speed.clone();
+        self.clock.set_speed_arc(speed);
     }
 }
 

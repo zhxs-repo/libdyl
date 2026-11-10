@@ -1,5 +1,5 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,6 +83,12 @@ pub struct Pipeline {
     first_frame_ready: Arc<AtomicBool>,
     pub volume: Arc<AtomicU32>,
     pub muted: Arc<AtomicBool>,
+    /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）
+    pub speed: Arc<AtomicU32>,
+    /// 字幕延迟（毫秒）
+    pub subtitle_delay_ms: Arc<AtomicI64>,
+    /// 音频延迟（毫秒）
+    pub audio_delay_ms: Arc<AtomicI64>,
     pub event_tx: Sender<PipelineEventMsg>,
     /// 本次播放会话标识：引擎据此丢弃重载后迟到的旧管线事件
     pub session: u64,
@@ -117,6 +123,9 @@ impl Pipeline {
             first_frame_ready: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU32::new(100)),
             muted: Arc::new(AtomicBool::new(false)),
+            speed: Arc::new(AtomicU32::new(1000)),
+            subtitle_delay_ms: Arc::new(AtomicI64::new(0)),
+            audio_delay_ms: Arc::new(AtomicI64::new(0)),
             event_tx,
             session,
             decode_device: Arc::new(Mutex::new(None)),
@@ -216,6 +225,37 @@ impl Pipeline {
         self.muted.load(Ordering::Relaxed)
     }
 
+    /// 设置播放速率（0.25–4.0）
+    pub fn set_speed(&self, speed: f64) {
+        self.speed.store((speed * 1000.0) as u32, Ordering::Relaxed);
+    }
+
+    /// 获取播放速率
+    pub fn get_speed(&self) -> f64 {
+        self.speed.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+
+    /// 设置字幕延迟（毫秒，正数推迟、负数提前）
+    pub fn set_subtitle_delay(&self, delay_ms: i64) {
+        self.subtitle_delay_ms.store(delay_ms, Ordering::Relaxed);
+    }
+
+    /// 获取字幕延迟（毫秒）
+    pub fn get_subtitle_delay(&self) -> i64 {
+        self.subtitle_delay_ms.load(Ordering::Relaxed)
+    }
+
+    /// 设置音频延迟（毫秒，正数推迟、负数提前）
+    pub fn set_audio_delay(&self, delay_ms: i64) {
+        self.audio_delay_ms.store(delay_ms, Ordering::Relaxed);
+        self.avsync.set_audio_delay(delay_ms);
+    }
+
+    /// 获取音频延迟（毫秒）
+    pub fn get_audio_delay(&self) -> i64 {
+        self.audio_delay_ms.load(Ordering::Relaxed)
+    }
+
     /// 实际送给他音频输出的增益：静音时为 0，否则为音量的 0.0-1.0 形式
     pub fn effective_volume(&self) -> f32 {
         if self.is_muted() {
@@ -312,6 +352,9 @@ impl Pipeline {
             first_frame_ready: self.first_frame_ready.clone(),
             volume: self.volume.clone(),
             muted: self.muted.clone(),
+            speed: self.speed.clone(),
+            subtitle_delay_ms: self.subtitle_delay_ms.clone(),
+            audio_delay_ms: self.audio_delay_ms.clone(),
             event_tx: self.event_tx.clone(),
             session: self.session,
             // 解码线程在运行中回退软解时要改这里，引擎 publish 时读到新后端
@@ -410,8 +453,9 @@ impl Pipeline {
                 }
             }
             tracing::info!("Pipeline::start: audio output initialized, spawning thread...");
-            // 音频输出即主时钟来源；无音频轨时时钟未 ready，AVSync 自动回退挂钟
+            audio_output.set_speed_arc(self.speed.clone());
             self.avsync.set_audio_clock(audio_output.clock());
+            self.avsync.set_speed_arc(self.speed.clone());
             let p = pipeline.clone();
             let reporter = pipeline.clone();
             let h = std::thread::Builder::new()

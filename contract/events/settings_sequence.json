@@ -6,8 +6,11 @@
     "data": {
       "volume": 80,
       "muted": true,
+      "speed": 1.0,
       "decode_mode": "auto",
       "subtitle_visible": true,
+      "subtitle_delay_ms": 0,
+      "audio_delay_ms": 0,
       "danmaku_visible": true,
       "danmaku_opacity": 80
     }

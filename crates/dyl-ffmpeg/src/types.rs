@@ -511,6 +511,17 @@ pub struct MediaInfo {
     ///
     /// 只喂给字幕引擎做样式表，不进快照 —— 契约里没有任何字段承载原始脚本。
     pub subtitle_script: Option<Vec<u8>>,
+    /// 容器章节标记（MKV/MP4 chapters）。空表示无章节。
+    pub chapters: Vec<ChapterInfo>,
+}
+
+/// 容器章节标记
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterInfo {
+    pub index: u32,
+    pub title: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// AV 时间基转换

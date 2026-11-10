@@ -1,6 +1,6 @@
 use dyl_audio::{AudioClock, AudioClockObservation};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -140,17 +140,14 @@ struct ClockState {
 /// 视频 PTS，音频模式则强制显示一帧（音频时钟是客观事实，不能由视频去改写）。
 pub struct AVSync {
     state: Mutex<ClockState>,
-    /// 音频主时钟句柄（由 pipeline 在启动音频输出后注入）
     audio_clock: Mutex<Option<AudioClock>>,
-    /// 门控的 state / generation 两轴输入（pipeline 的 paused、seek_generation）
     clock_context: Mutex<Option<ClockContext>>,
     gate: GateConfig,
-    /// 最大同步阈值（秒），视频落后超过此值则丢帧
     max_sync_threshold: f64,
-    /// 连续丢帧上限，超过后强制重新同步
     max_consecutive_drops: u32,
-    /// 主时钟与视频 PTS 最大允许漂移（秒），超过则重新同步
     max_drift_secs: f64,
+    /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）— 挂钟模式时缩放流逝时间
+    speed: Mutex<Arc<AtomicU32>>,
 }
 
 /// 门控要观察的 pipeline 共享状态
@@ -178,6 +175,7 @@ impl AVSync {
             max_sync_threshold: 0.1,
             max_consecutive_drops: 5,
             max_drift_secs: 2.0,
+            speed: Mutex::new(Arc::new(AtomicU32::new(1000))),
         }
     }
 
@@ -204,6 +202,18 @@ impl AVSync {
     /// 注入音频主时钟；传 `None` 表示该次播放不使用音频时钟
     pub fn set_audio_clock(&self, clock: Option<AudioClock>) {
         *self.audio_clock.lock() = clock;
+    }
+
+    /// 设置音频延迟（毫秒）— 传播到 AudioClock，偏移主时钟读数
+    pub fn set_audio_delay(&self, delay_ms: i64) {
+        if let Some(clock) = self.audio_clock.lock().as_ref() {
+            clock.set_audio_delay(delay_ms);
+        }
+    }
+
+    /// 替换播放速率的共享 Arc（由 Pipeline 在 start 时注入）
+    pub fn set_speed_arc(&self, speed: Arc<AtomicU32>) {
+        *self.speed.lock() = speed;
     }
 
     /// 通过六重门控的音频主时钟位置
@@ -258,9 +268,9 @@ impl AVSync {
     }
 
     /// 挂钟读数（音频时钟不可用时的主时钟）
-    fn wall_clock(state: &ClockState) -> f64 {
+    fn wall_clock(state: &ClockState, speed: f64) -> f64 {
         match state.start_instant {
-            Some(instant) => instant.elapsed().as_secs_f64() + state.base_pts,
+            Some(instant) => instant.elapsed().as_secs_f64() * speed + state.base_pts,
             None => 0.0,
         }
     }
@@ -281,7 +291,10 @@ impl AVSync {
         let mut state = self.state.lock();
         match self.gated_audio(&mut state) {
             Some(pts) => pts,
-            None => Self::wall_clock(&state),
+            None => {
+                let speed = self.speed.lock().load(Ordering::Relaxed) as f64 / 1000.0;
+                Self::wall_clock(&state, speed)
+            }
         }
     }
 
@@ -305,7 +318,13 @@ impl AVSync {
             return VideoSyncDecision::Display;
         }
 
-        let clock = audio.unwrap_or_else(|| Self::wall_clock(&state));
+        let clock = match audio {
+            Some(pts) => pts,
+            None => {
+                let speed = self.speed.lock().load(Ordering::Relaxed) as f64 / 1000.0;
+                Self::wall_clock(&state, speed)
+            }
+        };
         let diff = frame_pts - clock;
 
         if diff > 0.01 {

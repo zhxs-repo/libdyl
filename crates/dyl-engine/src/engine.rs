@@ -40,6 +40,10 @@ pub(crate) enum ControlMsg {
     },
     LoadDone(LoadOutcome),
     OverlayDone(OverlayOutcome),
+    ScreenshotDone {
+        request_id: u64,
+        result: Result<String, EngineError>,
+    },
     /// Surface 操作已改完 `OutputSlot` 与运行时状态；控制线程负责发布快照与事件
     SurfaceChanged {
         event: Option<Event>,
@@ -88,6 +92,7 @@ impl EngineShared {
             duration_ms: 0,
             volume: 100,
             muted: false,
+            speed: 1.0,
             decode: DecodeSnapshot {
                 mode: DecodeMode::Auto,
                 backend: DecodeBackend::Software,
@@ -100,6 +105,8 @@ impl EngineShared {
                 visible: true,
                 source: None,
             },
+            subtitle_delay_ms: 0,
+            audio_delay_ms: 0,
             danmaku: DanmakuSnapshot {
                 loaded: false,
                 visible: true,
@@ -107,6 +114,8 @@ impl EngineShared {
                 count: 0,
                 source: None,
             },
+            ab_loop: None,
+            chapters: Vec::new(),
             surface: SurfaceRuntime::default().snapshot(),
             stats: StatsSnapshot {
                 rendered_frames: 0,

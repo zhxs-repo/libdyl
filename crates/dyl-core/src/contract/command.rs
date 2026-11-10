@@ -84,6 +84,34 @@ pub enum Command {
     SetDecodeMode {
         mode: DecodeMode,
     },
+    /// 设置播放速率。`speed` 范围 0.25–4.0；1.0 为正常速度。
+    /// 音频按速率重采样（变调不补偿）；视频时钟按速率缩放。
+    SetSpeed {
+        speed: f64,
+    },
+    /// 截取当前画面。`with_subtitle` 含字幕层，`with_danmaku` 含弹幕层。
+    /// 结果在 `command_completed.result` 里返回 `{"path": "..."}`。
+    Screenshot {
+        with_subtitle: bool,
+        with_danmaku: bool,
+    },
+    /// 字幕延迟（毫秒，正数推迟、负数提前）。
+    SetSubtitleDelay {
+        delay_ms: i64,
+    },
+    /// 音频延迟（毫秒，正数推迟、负数提前）。
+    SetAudioDelay {
+        delay_ms: i64,
+    },
+    /// AB 循环：设置 A/B 点后播放到 B 自动跳回 A。`a_ms`/`b_ms` 都为 `None` 清除循环。
+    SetAbLoop {
+        a_ms: Option<u64>,
+        b_ms: Option<u64>,
+    },
+    /// 跳转到指定章节。`index` 是 `snapshot.chapters[].index`。
+    SeekChapter {
+        index: u32,
+    },
 }
 
 impl Command {
@@ -104,6 +132,12 @@ impl Command {
             Self::LoadDanmaku { .. } => CommandOp::LoadDanmaku,
             Self::SelectTrack { .. } => CommandOp::SelectTrack,
             Self::SetDecodeMode { .. } => CommandOp::SetDecodeMode,
+            Self::SetSpeed { .. } => CommandOp::SetSpeed,
+            Self::Screenshot { .. } => CommandOp::Screenshot,
+            Self::SetSubtitleDelay { .. } => CommandOp::SetSubtitleDelay,
+            Self::SetAudioDelay { .. } => CommandOp::SetAudioDelay,
+            Self::SetAbLoop { .. } => CommandOp::SetAbLoop,
+            Self::SeekChapter { .. } => CommandOp::SeekChapter,
         }
     }
 }

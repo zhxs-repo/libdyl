@@ -327,7 +327,7 @@ fn capabilities_fixtures_round_trip_and_respect_presentation_rules() {
     for platform in cases {
         let caps: Capabilities = round_trip(&format!("capabilities/{platform}.json"));
         assert_eq!(caps.schema, SCHEMA_VERSION);
-        assert_eq!(caps.abi, AbiVersion::V0_6_0);
+        assert_eq!(caps.abi, AbiVersion::V0_7_0);
         assert_eq!(caps.platform, platform);
         assert!(caps.presentation.external_surface);
         assert!(
@@ -377,8 +377,8 @@ fn capabilities_shape_is_stable_across_platforms() {
     for platform in ["android", "linux", "macos", "windows"] {
         let caps: Capabilities = round_trip(&format!("capabilities/{platform}.json"));
         assert_eq!(caps.schema, SCHEMA_VERSION);
-        assert_eq!(caps.abi, AbiVersion::V0_6_0);
-        assert_eq!(caps.abi.packed(), 6 << 8);
+        assert_eq!(caps.abi, AbiVersion::V0_7_0);
+        assert_eq!(caps.abi.packed(), 7 << 8);
         assert_eq!(caps.platform, platform);
 
         // 值不在本 crate 声明，但形状必须齐全：缺字段会让 Dart / C 客户端解析失败

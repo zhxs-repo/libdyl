@@ -34,6 +34,20 @@ sealed class Command {
         ),
       CommandOp.setDecodeMode =>
         SetDecodeModeCommand(DecodeMode.fromWire(json['mode'] as String)),
+      CommandOp.setSpeed => SetSpeedCommand(_double(json['speed'])),
+      CommandOp.screenshot => ScreenshotCommand(
+          withSubtitle: json['with_subtitle'] as bool? ?? false,
+          withDanmaku: json['with_danmaku'] as bool? ?? false,
+        ),
+      CommandOp.setSubtitleDelay =>
+        SetSubtitleDelayCommand(_int(json['delay_ms'])),
+      CommandOp.setAudioDelay =>
+        SetAudioDelayCommand(_int(json['delay_ms'])),
+      CommandOp.setAbLoop => SetAbLoopCommand(
+          aMs: json['a_ms'] == null ? null : _int(json['a_ms']),
+          bMs: json['b_ms'] == null ? null : _int(json['b_ms']),
+        ),
+      CommandOp.seekChapter => SeekChapterCommand(_int(json['index'])),
     };
   }
 
@@ -234,6 +248,88 @@ class SetDecodeModeCommand extends Command {
   Map<String, dynamic> toJson() => {'op': op.wire, 'mode': mode.wire};
 }
 
+class SetSpeedCommand extends Command {
+  const SetSpeedCommand(this.speed);
+
+  final double speed;
+
+  @override
+  CommandOp get op => CommandOp.setSpeed;
+
+  @override
+  Map<String, dynamic> toJson() => {'op': op.wire, 'speed': speed};
+}
+
+class ScreenshotCommand extends Command {
+  const ScreenshotCommand({this.withSubtitle = false, this.withDanmaku = false});
+
+  final bool withSubtitle;
+  final bool withDanmaku;
+
+  @override
+  CommandOp get op => CommandOp.screenshot;
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'op': op.wire,
+        'with_subtitle': withSubtitle,
+        'with_danmaku': withDanmaku,
+      };
+}
+
+class SetSubtitleDelayCommand extends Command {
+  const SetSubtitleDelayCommand(this.delayMs);
+
+  final int delayMs;
+
+  @override
+  CommandOp get op => CommandOp.setSubtitleDelay;
+
+  @override
+  Map<String, dynamic> toJson() => {'op': op.wire, 'delay_ms': delayMs};
+}
+
+class SetAudioDelayCommand extends Command {
+  const SetAudioDelayCommand(this.delayMs);
+
+  final int delayMs;
+
+  @override
+  CommandOp get op => CommandOp.setAudioDelay;
+
+  @override
+  Map<String, dynamic> toJson() => {'op': op.wire, 'delay_ms': delayMs};
+}
+
+class SetAbLoopCommand extends Command {
+  const SetAbLoopCommand({this.aMs, this.bMs});
+
+  final int? aMs;
+  final int? bMs;
+
+  @override
+  CommandOp get op => CommandOp.setAbLoop;
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'op': op.wire,
+        if (aMs != null) 'a_ms': aMs,
+        if (bMs != null) 'b_ms': bMs,
+      };
+}
+
+class SeekChapterCommand extends Command {
+  const SeekChapterCommand(this.index);
+
+  final int index;
+
+  @override
+  CommandOp get op => CommandOp.seekChapter;
+
+  @override
+  Map<String, dynamic> toJson() => {'op': op.wire, 'index': index};
+}
+
 class CommandEnvelope {
   const CommandEnvelope({
     required this.command,
@@ -388,8 +484,11 @@ class SettingsChangedEvent extends Event {
   const SettingsChangedEvent({
     required this.volume,
     required this.muted,
+    required this.speed,
     required this.decodeMode,
     required this.subtitleVisible,
+    required this.subtitleDelayMs,
+    required this.audioDelayMs,
     required this.danmakuVisible,
     required this.danmakuOpacity,
   });
@@ -398,16 +497,22 @@ class SettingsChangedEvent extends Event {
       SettingsChangedEvent(
         volume: _int(json['volume']),
         muted: json['muted'] as bool,
+        speed: _double(json['speed']),
         decodeMode: DecodeMode.fromWire(json['decode_mode'] as String),
         subtitleVisible: json['subtitle_visible'] as bool,
+        subtitleDelayMs: _int(json['subtitle_delay_ms']),
+        audioDelayMs: _int(json['audio_delay_ms']),
         danmakuVisible: json['danmaku_visible'] as bool,
         danmakuOpacity: _int(json['danmaku_opacity']),
       );
 
   final int volume;
   final bool muted;
+  final double speed;
   final DecodeMode decodeMode;
   final bool subtitleVisible;
+  final int subtitleDelayMs;
+  final int audioDelayMs;
   final bool danmakuVisible;
   final int danmakuOpacity;
 
@@ -418,8 +523,11 @@ class SettingsChangedEvent extends Event {
   Map<String, dynamic> toJson() => {
         'volume': volume,
         'muted': muted,
+        'speed': speed,
         'decode_mode': decodeMode.wire,
         'subtitle_visible': subtitleVisible,
+        'subtitle_delay_ms': subtitleDelayMs,
+        'audio_delay_ms': audioDelayMs,
         'danmaku_visible': danmakuVisible,
         'danmaku_opacity': danmakuOpacity,
       };

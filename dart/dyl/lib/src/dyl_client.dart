@@ -312,6 +312,36 @@ class DylClient {
   Future<CommandCompletedEvent> setDecodeMode(DecodeMode mode) =>
       execute(SetDecodeModeCommand(mode));
 
+  /// Set playback speed (0.25–4.0).
+  Future<CommandCompletedEvent> setSpeed(double speed) =>
+      execute(SetSpeedCommand(speed));
+
+  /// Capture a screenshot. Returns the file path in `result.path`.
+  Future<CommandCompletedEvent> screenshot({
+    bool withSubtitle = false,
+    bool withDanmaku = false,
+  }) =>
+      execute(ScreenshotCommand(
+        withSubtitle: withSubtitle,
+        withDanmaku: withDanmaku,
+      ));
+
+  /// Set subtitle delay in milliseconds (positive delays, negative advances).
+  Future<CommandCompletedEvent> setSubtitleDelay(int delayMs) =>
+      execute(SetSubtitleDelayCommand(delayMs));
+
+  /// Set audio delay in milliseconds (positive delays, negative advances).
+  Future<CommandCompletedEvent> setAudioDelay(int delayMs) =>
+      execute(SetAudioDelayCommand(delayMs));
+
+  /// Set A-B loop. Both null clears the loop; both set with a < b activates it.
+  Future<CommandCompletedEvent> setAbLoop({int? aMs, int? bMs}) =>
+      execute(SetAbLoopCommand(aMs: aMs, bMs: bMs));
+
+  /// Seek to the start of a chapter by index (from `snapshot.chapters`).
+  Future<CommandCompletedEvent> seekChapter(int index) =>
+      execute(SeekChapterCommand(index));
+
   // ═══════════════════════════════════════════════════
   // Snapshot / properties
   // ═══════════════════════════════════════════════════

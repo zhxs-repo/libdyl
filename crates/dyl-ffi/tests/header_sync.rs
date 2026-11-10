@@ -45,7 +45,7 @@ fn header_declares_abi_version_and_error_constants() {
 
     for (name, value) in [
         ("DYL_ABI_VERSION_MAJOR", 0),
-        ("DYL_ABI_VERSION_MINOR", 6),
+        ("DYL_ABI_VERSION_MINOR", 7),
         ("DYL_ABI_VERSION_PATCH", 0),
     ] {
         assert!(

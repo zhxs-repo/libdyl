@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 
 // ── ABI 常量（由 cbindgen 写进 dyl.h） ──────────────────────────
 pub const DYL_ABI_VERSION_MAJOR: u32 = 0;
-pub const DYL_ABI_VERSION_MINOR: u32 = 6;
+pub const DYL_ABI_VERSION_MINOR: u32 = 7;
 pub const DYL_ABI_VERSION_PATCH: u32 = 0;
 pub const DYL_ABI_VERSION: u32 =
     (DYL_ABI_VERSION_MAJOR << 16) | (DYL_ABI_VERSION_MINOR << 8) | DYL_ABI_VERSION_PATCH;
@@ -577,14 +577,14 @@ mod abi_tests {
     use std::ffi::CStr;
 
     #[test]
-    fn abi_version_is_packed_0_6_0() {
+    fn abi_version_is_packed_0_7_0() {
         assert_eq!(DYL_ABI_VERSION_MAJOR, 0);
-        assert_eq!(DYL_ABI_VERSION_MINOR, 6);
+        assert_eq!(DYL_ABI_VERSION_MINOR, 7);
         assert_eq!(DYL_ABI_VERSION_PATCH, 0);
-        assert_eq!(DYL_ABI_VERSION, 0x0000_0600);
+        assert_eq!(DYL_ABI_VERSION, 0x0000_0700);
         assert_eq!(
             dyl_abi_version(),
-            dyl_core::contract::AbiVersion::V0_6_0.packed()
+            dyl_core::contract::AbiVersion::V0_7_0.packed()
         );
     }
 
@@ -610,7 +610,7 @@ mod abi_tests {
         dyl_free_string_impl(ptr);
 
         let caps: Capabilities = serde_json::from_str(&json).unwrap();
-        assert_eq!(caps.abi, AbiVersion::V0_6_0);
+        assert_eq!(caps.abi, AbiVersion::V0_7_0);
         assert!(!caps.presentation.texture_sharing);
         assert!(caps.features.danmaku_xml_entities);
         assert_eq!(

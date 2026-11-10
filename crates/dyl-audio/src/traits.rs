@@ -6,6 +6,9 @@
 //! 于是 `cpal_output` 整个模块可以加 `#[cfg(not(target_os = "android"))]`，
 //! 而 `dyl-pipeline` 等调用方不需要任何条件编译。
 
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
+
 use dyl_core::Result;
 
 use crate::clock::AudioClock;
@@ -63,4 +66,7 @@ pub trait AudioOutput: Send {
     fn has_pending_audio(&self) -> bool {
         false
     }
+
+    /// 注入播放速率的共享 Arc（由 Pipeline 在 start 时调用）
+    fn set_speed_arc(&mut self, _speed: Arc<AtomicU32>) {}
 }

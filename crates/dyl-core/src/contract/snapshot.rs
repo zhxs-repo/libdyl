@@ -11,11 +11,16 @@ pub struct Snapshot {
     pub duration_ms: u64,
     pub volume: u8,
     pub muted: bool,
+    pub speed: f64,
     pub decode: DecodeSnapshot,
     pub source: Option<String>,
     pub media: Option<MediaInfo>,
     pub subtitle: SubtitleSnapshot,
+    pub subtitle_delay_ms: i64,
+    pub audio_delay_ms: i64,
     pub danmaku: DanmakuSnapshot,
+    pub ab_loop: Option<AbLoop>,
+    pub chapters: Vec<Chapter>,
     pub surface: SurfaceSnapshot,
     pub stats: StatsSnapshot,
     pub last_error: Option<SnapshotError>,
@@ -121,4 +126,19 @@ pub struct SnapshotError {
     pub code: ErrorCode,
     pub code_num: i32,
     pub message: String,
+}
+/// AB 循环区间。播放到 `b_ms` 时自动跳回 `a_ms`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbLoop {
+    pub a_ms: u64,
+    pub b_ms: u64,
+}
+
+/// 章节标记。`start_ms`/`end_ms` 是章节的起止时间。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chapter {
+    pub index: u32,
+    pub title: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
 }

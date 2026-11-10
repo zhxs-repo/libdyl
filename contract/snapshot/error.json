@@ -5,6 +5,7 @@
   "duration_ms": 120000,
   "volume": 80,
   "muted": false,
+  "speed": 1.0,
   "decode": { "mode": "auto", "backend": "software", "device": null },
   "source": "D:\\video.mp4",
   "media": {
@@ -16,7 +17,11 @@
     ]
   },
   "subtitle": { "loaded": true, "visible": true, "source": "D:\\sub.ass" },
+  "subtitle_delay_ms": 0,
+  "audio_delay_ms": 0,
   "danmaku": { "loaded": true, "visible": false, "opacity": 80, "count": 1234, "source": "D:\\danmaku.xml" },
+  "ab_loop": null,
+  "chapters": [],
   "surface": { "status": "attached", "kind": "windows_hwnd", "width": 1280, "height": 720, "scale_factor": 1.5 },
   "stats": { "rendered_frames": 1080, "dropped_frames": 7 },
   "last_error": { "code": "decode", "code_num": -5, "message": "decode failed: invalid NAL unit" }

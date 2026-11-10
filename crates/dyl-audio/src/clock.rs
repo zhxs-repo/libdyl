@@ -38,23 +38,18 @@ pub struct AudioClockObservation {
 /// 音频主时钟句柄 — 可克隆，写入侧、设备回调、AV 同步各持一份
 #[derive(Clone)]
 pub struct AudioClock {
-    /// 设备尚未取走的帧数（写入 +1，回调 -1，下限 0）
     backlog: Arc<AtomicI64>,
-    /// 最近一次写入帧的结束 PTS（媒体时间，秒），以 f64 bits 存放
     end_pts: Arc<AtomicU64>,
-    /// 设备采样率，帧数换算时长用
     rate: Arc<AtomicU32>,
-    /// 是否已写入过带时间戳的帧
     ready: Arc<AtomicBool>,
-    /// 带 pts 的写入次数，用于识别读数是否来自新的批次
     sequence: Arc<AtomicU64>,
-    /// 写入侧同步过来的 seek generation
     generation: Arc<AtomicU64>,
-    /// `reset` 次数：区分 flush 前后的两段互不相干的播放
     epoch: Arc<AtomicU64>,
-    /// 时效基准（构造时刻）与最后一次推进的毫秒偏移
     created: Arc<Instant>,
     last_move_ms: Arc<AtomicU64>,
+    audio_delay_ms: Arc<AtomicI64>,
+    /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）
+    speed: Arc<AtomicU32>,
 }
 
 impl Default for AudioClock {
@@ -75,6 +70,8 @@ impl AudioClock {
             epoch: Arc::new(AtomicU64::new(0)),
             created: Arc::new(Instant::now()),
             last_move_ms: Arc::new(AtomicU64::new(0)),
+            audio_delay_ms: Arc::new(AtomicI64::new(0)),
+            speed: Arc::new(AtomicU32::new(1000)),
         }
     }
 
@@ -153,7 +150,19 @@ impl AudioClock {
         }
         let pts = f64::from_bits(self.end_pts.load(Ordering::Acquire));
         let backlog = self.backlog.load(Ordering::Acquire).max(0);
-        Some(pts - backlog as f64 / rate as f64)
+        let delay_ms = self.audio_delay_ms.load(Ordering::Relaxed);
+        let speed = self.speed.load(Ordering::Relaxed) as f64 / 1000.0;
+        Some(pts - backlog as f64 * speed / rate as f64 - delay_ms as f64 / 1000.0)
+    }
+
+    /// 设置音频延迟（毫秒；正数推迟、负数提前）
+    pub fn set_audio_delay(&self, delay_ms: i64) {
+        self.audio_delay_ms.store(delay_ms, Ordering::Relaxed);
+    }
+
+    /// 替换播放速率的共享 Arc（由 Pipeline 在 start 时注入，所有克隆体共享同一份）
+    pub fn set_speed_arc(&mut self, speed: Arc<AtomicU32>) {
+        self.speed = speed;
     }
 
     /// 清空状态（seek / stop 时与输出缓冲一起 flush）

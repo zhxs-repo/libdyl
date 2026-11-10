@@ -38,7 +38,7 @@ pub const ATTACH_BEFORE_LOAD: bool = true;
 pub fn capabilities() -> Capabilities {
     Capabilities {
         schema: SCHEMA_VERSION,
-        abi: AbiVersion::V0_6_0,
+        abi: AbiVersion::V0_7_0,
         platform: std::env::consts::OS.to_string(),
         gpu_backends: dyl_render::capabilities::gpu_backends(),
         protocols: dyl_ffmpeg::capabilities::source_protocols(),
@@ -78,7 +78,7 @@ mod tests {
     fn assembled_values_come_from_the_implementing_crates() {
         let caps = capabilities();
         assert_eq!(caps.schema, SCHEMA_VERSION);
-        assert_eq!(caps.abi, AbiVersion::V0_6_0);
+        assert_eq!(caps.abi, AbiVersion::V0_7_0);
         assert_eq!(caps.platform, std::env::consts::OS);
 
         assert_eq!(caps.gpu_backends, dyl_render::capabilities::gpu_backends());

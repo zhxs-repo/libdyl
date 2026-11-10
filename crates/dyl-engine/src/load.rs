@@ -58,6 +58,7 @@ pub(crate) struct LoadReady {
     pub media: MediaInfo,
     pub duration_ms: u64,
     pub font_missing: bool,
+    pub chapters: Vec<dyl_core::contract::Chapter>,
 }
 
 pub(crate) enum LoadOutcome {
@@ -179,6 +180,8 @@ fn build(shared: &Arc<EngineShared>, job: &LoadJob) -> Result<LoadReady, EngineE
         decode_policy(job.decode_mode),
     )?;
 
+    let chapters = build_chapters(&info);
+
     Ok(LoadReady {
         generation: job.generation,
         request_id: job.request_id,
@@ -190,6 +193,7 @@ fn build(shared: &Arc<EngineShared>, job: &LoadJob) -> Result<LoadReady, EngineE
         media,
         duration_ms,
         font_missing,
+        chapters,
     })
 }
 
@@ -248,4 +252,15 @@ fn decode_policy(mode: DecodeMode) -> dyl_ffmpeg::hwaccel::Policy {
 
 fn audio_codec_name(codec: Option<AudioCodecId>) -> &'static str {
     codec.map_or("unknown", AudioCodecId::label)
+}
+fn build_chapters(info: &dyl_ffmpeg::MediaInfo) -> Vec<dyl_core::contract::Chapter> {
+    info.chapters
+        .iter()
+        .map(|ch| dyl_core::contract::Chapter {
+            index: ch.index,
+            title: ch.title.clone(),
+            start_ms: ch.start_ms,
+            end_ms: ch.end_ms,
+        })
+        .collect()
 }

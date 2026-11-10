@@ -32,6 +32,16 @@ impl AbiVersion {
         patch: 0,
     };
 
+    /// `0.7.0`：新增命令 `set_speed`/`screenshot`/`set_subtitle_delay`/
+    /// `set_audio_delay`/`set_ab_loop`/`seek_chapter`；`Snapshot` 增加 `speed`/
+    /// `subtitle_delay_ms`/`audio_delay_ms`/`ab_loop`/`chapters`；
+    /// `SettingsChanged` 增加 `speed`/`subtitle_delay_ms`/`audio_delay_ms`。
+    pub const V0_7_0: Self = Self {
+        major: 0,
+        minor: 7,
+        patch: 0,
+    };
+
     /// `(major<<16)|(minor<<8)|patch`，与 `dyl_abi_version()` 一致。
     pub const fn packed(self) -> u32 {
         ((self.major as u32) << 16) | ((self.minor as u32) << 8) | self.patch as u32

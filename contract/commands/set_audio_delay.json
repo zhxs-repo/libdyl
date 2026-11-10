@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 123,
+  "op": "set_audio_delay",
+  "delay_ms": -200
+}

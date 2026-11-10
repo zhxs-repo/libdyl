@@ -178,6 +178,14 @@ pub trait VideoOutput: Send {
     fn detach(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// 截图：把当前帧（可选含字幕/弹幕叠加层）编码为 PNG 并保存到临时文件，
+    /// 返回文件路径。默认实现返回 `NotSupported`。
+    fn capture_screenshot(&mut self, _with_subtitle: bool, _with_danmaku: bool) -> Result<String> {
+        Err(dyl_core::DylError::NotSupported(
+            "screenshot is not supported by this output".into(),
+        ))
+    }
 }
 
 /// 无 Surface 时的输出：丢帧，音频与主时钟照常前进。
@@ -251,6 +259,12 @@ impl OutputSlot {
 
     pub fn stats(&self) -> OutputStatsSnapshot {
         self.output.lock().stats()
+    }
+
+    pub fn capture_screenshot(&self, with_subtitle: bool, with_danmaku: bool) -> Result<String> {
+        self.output
+            .lock()
+            .capture_screenshot(with_subtitle, with_danmaku)
     }
 
     /// 换出新输出。返回的旧输出由调用方决定 `detach` 与 drop 时机。

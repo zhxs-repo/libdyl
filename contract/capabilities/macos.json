@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "abi": { "major": 0, "minor": 6, "patch": 0 },
+  "abi": { "major": 0, "minor": 7, "patch": 0 },
   "platform": "macos",
   "gpu_backends": ["vulkan", "metal", "gles"],
   "protocols": ["http", "https"],

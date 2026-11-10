@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "request_id": 122,
+  "op": "set_subtitle_delay",
+  "delay_ms": 500
+}

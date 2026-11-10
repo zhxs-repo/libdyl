@@ -56,12 +56,15 @@ pub struct SeekCompleted {
     pub mode: SeekMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsChanged {
     pub volume: u8,
     pub muted: bool,
+    pub speed: f64,
     pub decode_mode: DecodeMode,
     pub subtitle_visible: bool,
+    pub subtitle_delay_ms: i64,
+    pub audio_delay_ms: i64,
     pub danmaku_visible: bool,
     pub danmaku_opacity: u8,
 }

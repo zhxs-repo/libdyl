@@ -7,6 +7,7 @@
 //! 行为与旧实现一致。
 
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::ass::{eval_fade, eval_move, Alignment, AssEvent, AssStyle, AssTags};
 use crate::fonts::{covers, FontLibrary};
@@ -200,6 +201,8 @@ pub struct SubtitleEngine {
     state: Arc<Mutex<SubtitleState>>,
     /// 渲染配置
     config: SubtitleConfig,
+    /// 字幕延迟（毫秒；正数推迟、负数提前）— 渲染线程在 update() 中读取
+    subtitle_delay_ms: Arc<AtomicI64>,
     /// 回退字体 + `Fontname` → face 解析（含系统字体索引）
     fonts: FontLibrary,
     /// 缓存的纹理（key = 文本+字号+颜色哈希）
@@ -238,6 +241,7 @@ impl SubtitleEngine {
                 external_source: false,
             })),
             config,
+            subtitle_delay_ms: Arc::new(AtomicI64::new(0)),
             fonts: FontLibrary::default(),
             texture_cache: HashMap::new(),
             texture_order: VecDeque::new(),
@@ -273,6 +277,11 @@ impl SubtitleEngine {
     /// 获取共享状态句柄
     pub fn shared_state(&self) -> Arc<Mutex<SubtitleState>> {
         self.state.clone()
+    }
+
+    /// 设置字幕延迟（毫秒；正数推迟、负数提前）
+    pub fn set_subtitle_delay(&self, delay_ms: i64) {
+        self.subtitle_delay_ms.store(delay_ms, Ordering::Relaxed);
     }
 
     /// 加载字幕文件（.ass/.ssa 保留样式表与特效标签；其余按纯文本事件）
@@ -1147,14 +1156,15 @@ impl Overlay for SubtitleEngine {
             return;
         }
 
-        // 数据源：ASS 事件优先（含特效）；无 ASS 数据时回退到直接写入的 events
-        // （外部测试会绕过 load_* 直接赋值 state.events）
+        let delay_ms = self.subtitle_delay_ms.load(Ordering::Relaxed);
+        let adjusted_pts = pts - delay_ms as f64 / 1000.0;
+
         let fallback: Vec<AssEvent>;
         let source: &[AssEvent] = if state.ass_events.is_empty() {
             fallback = state
                 .events
                 .iter()
-                .filter(|e| pts >= e.start_time && pts < e.end_time)
+                .filter(|e| adjusted_pts >= e.start_time && adjusted_pts < e.end_time)
                 .cloned()
                 .map(AssEvent::plain)
                 .collect();
@@ -1166,7 +1176,9 @@ impl Overlay for SubtitleEngine {
         let mut refs: Vec<&AssEvent> = source
             .iter()
             .filter(|e| {
-                pts >= e.base.start_time && pts < e.base.end_time && !e.base.text.trim().is_empty()
+                adjusted_pts >= e.base.start_time
+                    && adjusted_pts < e.base.end_time
+                    && !e.base.text.trim().is_empty()
             })
             .collect();
 
@@ -1182,7 +1194,7 @@ impl Overlay for SubtitleEngine {
         let items: Vec<RenderItem> = refs
             .iter()
             .take(MAX_ITEMS)
-            .filter_map(|e| self.make_item(e, &state, pts))
+            .filter_map(|e| self.make_item(e, &state, adjusted_pts))
             .collect();
 
         // 兼容旧接口：拼接纯文本
@@ -1198,9 +1210,10 @@ impl Overlay for SubtitleEngine {
         if self.frame_count.is_multiple_of(300) {
             let preview: String = new_text.chars().take(40).collect();
             tracing::info!(
-                "SubtitleEngine::update: frame={} pts={:.2}s events={} active={} text={:?}",
+                "SubtitleEngine::update: frame={} pts={:.2}s delay={}ms events={} active={} text={:?}",
                 self.frame_count,
                 pts,
+                delay_ms,
                 source.len(),
                 items.len(),
                 preview

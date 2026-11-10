@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use crossbeam_channel::Receiver;
 use dyl_core::contract::{
-    Command, CommandCompleted, CommandOp, CommandStatus, DanmakuSnapshot, DecodeBackend,
-    DecodeMode, DecodeSnapshot, ErrorCode, ErrorEvent, ErrorInfo, Event, FileLoaded, MediaInfo,
-    PlayerState, PositionChanged, SeekCompleted, SeekMode, SettingsChanged, Snapshot,
+    AbLoop, Chapter, Command, CommandCompleted, CommandOp, CommandStatus, DanmakuSnapshot,
+    DecodeBackend, DecodeMode, DecodeSnapshot, ErrorCode, ErrorEvent, ErrorInfo, Event, FileLoaded,
+    MediaInfo, PlayerState, PositionChanged, SeekCompleted, SeekMode, SettingsChanged, Snapshot,
     SnapshotError, StateChangeReason, StateChanged, StatsSnapshot, SubtitleSnapshot, TrackKind,
     Warning, SCHEMA_VERSION,
 };
@@ -70,9 +70,12 @@ pub(crate) struct ControlState {
     position_ms: u64,
     volume: u8,
     muted: bool,
+    speed: f64,
     /// 解码方式设置；实际后端由活管线的 `decode_device()` 决定
     decode_mode: DecodeMode,
     subtitle_visible: bool,
+    subtitle_delay_ms: i64,
+    audio_delay_ms: i64,
     danmaku_visible: bool,
     danmaku_opacity: u8,
     subtitle_loaded: bool,
@@ -80,6 +83,8 @@ pub(crate) struct ControlState {
     danmaku_loaded: bool,
     danmaku_source: Option<String>,
     danmaku_count: u64,
+    ab_loop: Option<AbLoop>,
+    chapters: Vec<Chapter>,
     last_error: Option<SnapshotError>,
 
     pipeline: Option<Arc<Pipeline>>,
@@ -110,9 +115,12 @@ impl ControlState {
             position_ms: 0,
             volume: 100,
             muted: false,
+            speed: 1.0,
             // 默认 `auto`：硬解优先、失败或平台未实测回退软解（映射见 load.rs）
             decode_mode: DecodeMode::Auto,
             subtitle_visible: true,
+            subtitle_delay_ms: 0,
+            audio_delay_ms: 0,
             danmaku_visible: true,
             danmaku_opacity: 100,
             subtitle_loaded: false,
@@ -120,6 +128,8 @@ impl ControlState {
             danmaku_loaded: false,
             danmaku_source: None,
             danmaku_count: 0,
+            ab_loop: None,
+            chapters: Vec::new(),
             last_error: None,
             pipeline: None,
             session: 0,
@@ -161,6 +171,9 @@ impl ControlState {
             } => self.handle_command(request_id, command),
             ControlMsg::LoadDone(outcome) => self.handle_load_done(outcome),
             ControlMsg::OverlayDone(outcome) => self.handle_overlay_done(outcome),
+            ControlMsg::ScreenshotDone { request_id, result } => {
+                self.handle_screenshot_done(request_id, result);
+            }
             ControlMsg::SurfaceChanged { event, ack } => {
                 self.publish();
                 if let Some(event) = event {
@@ -256,6 +269,17 @@ impl ControlState {
             ),
             Command::SelectTrack { kind, index } => self.cmd_select_track(request_id, kind, index),
             Command::SetDecodeMode { mode } => self.cmd_set_decode_mode(request_id, mode),
+            Command::SetSpeed { speed } => self.cmd_set_speed(request_id, speed),
+            Command::Screenshot {
+                with_subtitle,
+                with_danmaku,
+            } => self.cmd_screenshot(request_id, with_subtitle, with_danmaku),
+            Command::SetSubtitleDelay { delay_ms } => {
+                self.cmd_set_subtitle_delay(request_id, delay_ms)
+            }
+            Command::SetAudioDelay { delay_ms } => self.cmd_set_audio_delay(request_id, delay_ms),
+            Command::SetAbLoop { a_ms, b_ms } => self.cmd_set_ab_loop(request_id, a_ms, b_ms),
+            Command::SeekChapter { index } => self.cmd_seek_chapter(request_id, index),
         }
     }
 
@@ -591,6 +615,110 @@ impl ControlState {
         self.publish();
     }
 
+    fn cmd_set_speed(&mut self, request_id: u64, speed: f64) {
+        let op = CommandOp::SetSpeed;
+        let clamped = speed.clamp(0.25, 4.0);
+        self.speed = clamped;
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.set_speed(clamped);
+        }
+        self.publish();
+        self.emit_settings();
+        self.complete_ok(request_id, op);
+    }
+
+    fn cmd_screenshot(&mut self, request_id: u64, with_subtitle: bool, with_danmaku: bool) {
+        let op = CommandOp::Screenshot;
+        if self.pipeline.is_none() {
+            self.complete_error(
+                request_id,
+                op,
+                &EngineError::invalid_state("no pipeline for screenshot"),
+            );
+            return;
+        }
+        let shared = self.shared.clone();
+        #[allow(clippy::result_large_err)]
+        let result = std::thread::Builder::new()
+            .name("dyl-screenshot".into())
+            .spawn(move || {
+                let result = shared
+                    .output
+                    .capture_screenshot(with_subtitle, with_danmaku)
+                    .map_err(EngineError::from);
+                shared
+                    .control_tx
+                    .send(ControlMsg::ScreenshotDone { request_id, result })
+            });
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                self.complete_error(
+                    request_id,
+                    op,
+                    &EngineError::new(ErrorCode::Internal, format!("spawn screenshot: {e}")),
+                );
+            }
+        }
+    }
+
+    fn cmd_set_subtitle_delay(&mut self, request_id: u64, delay_ms: i64) {
+        let op = CommandOp::SetSubtitleDelay;
+        self.subtitle_delay_ms = delay_ms;
+        self.shared
+            .overlays
+            .subtitle
+            .lock()
+            .set_subtitle_delay(delay_ms);
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.set_subtitle_delay(delay_ms);
+        }
+        self.publish();
+        self.emit_settings();
+        self.complete_ok(request_id, op);
+    }
+
+    fn cmd_set_audio_delay(&mut self, request_id: u64, delay_ms: i64) {
+        let op = CommandOp::SetAudioDelay;
+        self.audio_delay_ms = delay_ms;
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.set_audio_delay(delay_ms);
+        }
+        self.publish();
+        self.emit_settings();
+        self.complete_ok(request_id, op);
+    }
+
+    fn cmd_set_ab_loop(&mut self, request_id: u64, a_ms: Option<u64>, b_ms: Option<u64>) {
+        let op = CommandOp::SetAbLoop;
+        self.ab_loop = match (a_ms, b_ms) {
+            (Some(a), Some(b)) if a < b => Some(AbLoop { a_ms: a, b_ms: b }),
+            _ => None,
+        };
+        self.publish();
+        self.emit_settings();
+        self.complete_ok(request_id, op);
+    }
+
+    fn cmd_seek_chapter(&mut self, request_id: u64, index: u32) {
+        let op = CommandOp::SeekChapter;
+        let Some(chapter) = self.chapters.iter().find(|c| c.index == index) else {
+            self.complete_error(
+                request_id,
+                op,
+                &EngineError::invalid_argument(format!("chapter index {index} not found")),
+            );
+            return;
+        };
+        self.cmd_seek(
+            request_id,
+            op,
+            Some(chapter.start_ms),
+            None,
+            SeekMode::Exact,
+        );
+    }
+
     // ── Worker 回调 ─────────────────────────────────────────────
 
     fn handle_load_done(&mut self, outcome: LoadOutcome) {
@@ -813,9 +941,13 @@ impl ControlState {
         self.source = Some(ready.source.clone());
         self.media = Some(ready.media.clone());
         self.duration_ms = ready.duration_ms;
+        self.chapters = ready.chapters.clone();
         if let Some(pipeline) = &self.pipeline {
             pipeline.set_volume(self.volume);
             pipeline.set_mute(self.muted);
+            pipeline.set_speed(self.speed);
+            pipeline.set_subtitle_delay(self.subtitle_delay_ms);
+            pipeline.set_audio_delay(self.audio_delay_ms);
         }
     }
 
@@ -857,6 +989,17 @@ impl ControlState {
                 self.complete_with_result(outcome.request_id, outcome.op, result);
             }
             Err(error) => self.complete_error(outcome.request_id, outcome.op, &error),
+        }
+    }
+
+    fn handle_screenshot_done(&mut self, request_id: u64, result: Result<String, EngineError>) {
+        let op = CommandOp::Screenshot;
+        match result {
+            Ok(path) => {
+                let result = serde_json::json!({ "path": path });
+                self.complete_with_result(request_id, op, result);
+            }
+            Err(error) => self.complete_error(request_id, op, &error),
         }
     }
 
@@ -985,6 +1128,30 @@ impl ControlState {
     fn on_tick(&mut self) {
         if self.state != PlayerState::Playing || self.pipeline.is_none() {
             return;
+        }
+        // AB 循环：播放到 B 点自动跳回 A 点
+        if let Some(ab) = self.ab_loop {
+            let live = self.live_position_ms();
+            if live >= ab.b_ms {
+                let Some(pipeline) = self.pipeline.clone() else {
+                    return;
+                };
+                let tag = self.next_seek_tag();
+                *pipeline.seek_request.lock() = Some(SeekRequest {
+                    target: ab.a_ms as f64 / 1000.0,
+                    from: live as f64 / 1000.0,
+                    tag,
+                    exact: true,
+                });
+                self.pending_seek = Some(PendingSeek {
+                    request_id: 0,
+                    op: CommandOp::Seek,
+                    tag,
+                    from_ms: live,
+                    to_ms: ab.a_ms,
+                    mode: SeekMode::Exact,
+                });
+            }
         }
         self.publish();
         self.emit_position(self.position_ms);
@@ -1149,6 +1316,7 @@ impl ControlState {
             duration_ms: self.duration_ms,
             volume: self.volume,
             muted: self.muted,
+            speed: self.speed,
             decode: DecodeSnapshot {
                 mode: self.decode_mode,
                 backend,
@@ -1161,6 +1329,8 @@ impl ControlState {
                 visible: self.subtitle_visible,
                 source: self.subtitle_source.clone(),
             },
+            subtitle_delay_ms: self.subtitle_delay_ms,
+            audio_delay_ms: self.audio_delay_ms,
             danmaku: DanmakuSnapshot {
                 loaded: self.danmaku_loaded,
                 visible: self.danmaku_visible,
@@ -1168,6 +1338,8 @@ impl ControlState {
                 count: self.danmaku_count,
                 source: self.danmaku_source.clone(),
             },
+            ab_loop: self.ab_loop,
+            chapters: self.chapters.clone(),
             surface,
             stats: StatsSnapshot {
                 rendered_frames: stats.rendered_frames,
@@ -1197,8 +1369,11 @@ impl ControlState {
         self.events.emit(Event::SettingsChanged(SettingsChanged {
             volume: self.volume,
             muted: self.muted,
+            speed: self.speed,
             decode_mode: self.decode_mode,
             subtitle_visible: self.subtitle_visible,
+            subtitle_delay_ms: self.subtitle_delay_ms,
+            audio_delay_ms: self.audio_delay_ms,
             danmaku_visible: self.danmaku_visible,
             danmaku_opacity: self.danmaku_opacity,
         }));
