@@ -59,6 +59,17 @@ abs_dir() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
 
 resolve_asset() {
   local name="$1" root
+  # 绝对路径直接透传：与 Rust 侧 PathBuf::join 遇绝对路径整体替换一致。
+  # 一律拼 $root 会把 DYL_SOAK_ASSET=D:/assets/x.mp4 拼成 D:/repo/D:/assets/x.mp4
+  case "$name" in
+    /*|[A-Za-z]:*)
+      if [[ -f "$name" ]]; then
+        printf '%s\n' "$name"
+        return 0
+      fi
+      return 1
+      ;;
+  esac
   root="$(abs_dir .)"
   local candidates=("$root/$name" "$root/tmp_verify/$name")
   if [[ -n "${DYL_TEST_ASSET_DIR:-}" && -d "$DYL_TEST_ASSET_DIR" ]]; then
