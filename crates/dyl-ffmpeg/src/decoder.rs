@@ -186,8 +186,10 @@ pub struct FfmpegVideoDecoder {
     /// 当前输出通路是按哪一路"源格式 + 尺寸"配的；帧上一变就重建
     configured: Option<(ffmpeg_next::format::Pixel, u32, u32)>,
     fallback: FallbackWatch,
-    /// 回退软解后等到的下一个关键帧之前，其余包全部跳过
+    /// 已决定回退软解：硬解继续出帧直到下一个关键帧，在那里换解码器从 IDR 重起
     await_key: bool,
+    /// 重建软解失败的告警只发一次（每个关键帧都会重试，不能逐次刷屏）
+    fallback_fail_notified: bool,
     notice: Option<DecoderNotice>,
 }
 
@@ -203,6 +205,7 @@ impl FfmpegVideoDecoder {
             configured: None,
             fallback: FallbackWatch::new(None),
             await_key: false,
+            fallback_fail_notified: false,
             notice: None,
         }
     }
@@ -221,7 +224,7 @@ impl FfmpegVideoDecoder {
     /// AV1 的软解是唯一需要显式选解码器的编码：FFmpeg 内置 `av1` 只做硬件
     /// 解码，软解必须挑 `libdav1d` / `libaom-av1`（见 [`open_software_av1`]）。
     /// [`Policy::Auto`] 下硬解打开失败时回退软解：`avcodec_get_hw_config` 只说明
-    /// 解码器**声明**了该设备，GPU 是否支持 AV1 要到 `avcodec_open2` 才知道。
+    /// 解码器**声明**了该设备，GPU 是否真支持这个编码要到 `avcodec_open2` 才知道。
     pub fn with_policy(mut ctx: ffmpeg_next::codec::Context, policy: Policy) -> Result<Self> {
         let is_av1 = ctx.id() == ffmpeg_next::codec::Id::AV1;
         // FFmpeg 的 `threads` 默认是 1；CLI 的"自动"其实是它自己另设的。4K10
@@ -237,17 +240,10 @@ impl FfmpegVideoDecoder {
             // （那一次 `avcodec_open2`）之前用完
             unsafe { hwaccel::install(ctx.as_mut_ptr(), plan) }?;
         }
-        let av1_fallback = if is_av1 && plan.is_some() && matches!(policy, Policy::Auto) {
+        // 硬解打开失败 / 运行中跟不上时都靠这份参数重建软解上下文；
+        // 显式点名的设备不参与自动回退（用户点名要的设备不偷偷换掉）
+        let fallback_parameters = if plan.is_some() && matches!(policy, Policy::Auto) {
             Some(codec_parameters(&ctx)?)
-        } else {
-            None
-        };
-        // 运行中回退软解也靠这份参数重建上下文；显式点名的设备不参与自动回退
-        let runtime_fallback = if plan.is_some() && matches!(policy, Policy::Auto) {
-            Some(match av1_fallback.as_ref() {
-                Some(parameters) => parameters.clone(),
-                None => codec_parameters(&ctx)?,
-            })
         } else {
             None
         };
@@ -256,19 +252,26 @@ impl FfmpegVideoDecoder {
         } else {
             match ctx.decoder().video() {
                 Ok(video) => video,
-                Err(e) => match av1_fallback {
+                Err(e) => match fallback_parameters.as_ref() {
                     Some(parameters) => {
-                        tracing::warn!("AV1 硬解打开失败（{e}），回退软件解码");
+                        tracing::warn!("硬解打开失败（{e}），回退软件解码");
                         plan = None;
-                        let mut fresh = ffmpeg_next::codec::Context::from_parameters(parameters)
-                            .map_err(|e| {
-                                DylError::Decode(format!("rebuild AV1 software context: {e}"))
-                            })?;
+                        let mut fresh =
+                            ffmpeg_next::codec::Context::from_parameters(parameters.clone())
+                                .map_err(|e| {
+                                    DylError::Decode(format!("rebuild software context: {e}"))
+                                })?;
                         fresh.set_threading(ffmpeg_next::codec::threading::Config {
                             kind: ffmpeg_next::codec::threading::Type::Frame,
                             count: 0,
                         });
-                        open_software_av1(fresh)?
+                        if is_av1 {
+                            open_software_av1(fresh)?
+                        } else {
+                            fresh.decoder().video().map_err(|e| {
+                                DylError::Decode(format!("open software decoder: {e}"))
+                            })?
+                        }
                     }
                     None => {
                         return Err(DylError::Decode(format!("video decoder open: {e}")));
@@ -305,8 +308,9 @@ impl FfmpegVideoDecoder {
             // 纯软解保持原样，打开时就定下，行为与接硬解之前逐字节一致
             configured: plan.is_none().then_some(open_source),
             hw: plan,
-            fallback: FallbackWatch::new(runtime_fallback),
+            fallback: FallbackWatch::new(fallback_parameters),
             await_key: false,
+            fallback_fail_notified: false,
             notice: None,
         })
     }
@@ -370,9 +374,10 @@ impl FfmpegVideoDecoder {
 
     /// 运行时回退软解：用打开前保存的流参数重建上下文
     ///
-    /// 与打开时的 AV1 回退同一条路：参数里带着编码格式与 extradata，重建后
-    /// 从下一个关键帧继续解码（解码器对象在整个 GOP 中途换不了，换完必须由
-    /// IDR 重新起头）。重建失败不致命 —— 保留原硬解，回退看护就此关掉。
+    /// 与打开时的回退同一条路：参数里带着编码格式与 extradata，重建后从下一个
+    /// 关键帧继续解码（解码器对象在整个 GOP 中途换不了，换完必须由 IDR 重新
+    /// 起头）。重建失败不致命 —— 保留原硬解，下一个关键帧再试（看护已触发过，
+    /// 不会重复累加）。
     fn rebuild_software(&mut self) -> Result<()> {
         let parameters = self.fallback.parameters.clone().ok_or_else(|| {
             DylError::Internal("runtime fallback without stream parameters".into())
@@ -532,15 +537,24 @@ fn read_back_frame(
 
 impl VideoDecoder for FfmpegVideoDecoder {
     fn submit_packet(&mut self, packet: &Packet) -> Result<()> {
-        // 已决定回退软解：跳过当前 GOP 的剩余包，等下一个关键帧时换解码器。
-        // 立即重建会把这段画面整段黑掉，等关键帧则画面连续到切换点
-        if self.await_key {
-            if !packet.is_key {
-                return Ok(());
-            }
+        // 已决定回退软解：硬解继续喂包出帧，画面不断；到下一个关键帧才换解码器
+        // 从 IDR 重起（解码器对象在 GOP 中途换不了）。跳过非关键帧的旧做法会把
+        // 切换点前的整段画面冻住，GOP 越长冻得越久
+        if self.await_key && packet.is_key {
             self.await_key = false;
             if let Err(e) = self.rebuild_software() {
                 tracing::warn!("hardware decode fallback failed ({e}); keeping hardware path");
+                if !self.fallback_fail_notified {
+                    self.fallback_fail_notified = true;
+                    self.notice = Some(DecoderNotice {
+                        code: "hardware_decode_fallback_failed",
+                        message: format!(
+                            "could not switch to software decode ({e}); staying on hardware, \
+                             will retry at the next keyframe"
+                        ),
+                    });
+                }
+                self.await_key = true;
             }
         }
         let started = Instant::now();
@@ -638,10 +652,12 @@ impl FfmpegVideoDecoder {
                 let cpu = from_hw.then(|| {
                     std::mem::replace(&mut self.cpu_frame, ffmpeg_next::frame::Video::empty())
                 });
-                let (width, height, planes) = self.take_planes(cpu.as_ref().unwrap_or(&frame))?;
+                // 转换失败也要把回传缓冲放回去，否则下一帧只能重新分配
+                let result = self.take_planes(cpu.as_ref().unwrap_or(&frame));
                 if let Some(cpu) = cpu {
                     self.cpu_frame = cpu;
                 }
+                let (width, height, planes) = result?;
 
                 // 视频解码帧 PTS 是输入 Packet PTS 的透传，时间基同为 pkt_timebase；
                 // 无时间戳（NOPTS）时保持 None，不伪装成 0。硬解也一律取 GPU 帧：
@@ -1660,7 +1676,7 @@ mod tests {
         assert!(planes[1].data.iter().all(|&v| v == 128));
     }
 
-    /// 看护窗口：预热帧不计账；窗口内忙时超过内容时长 1.15 倍才回退，且只回退一次
+    /// 看护窗口：预热帧不计账；窗口内忙时超过内容时长 1.05 倍才回退，且只回退一次
     #[test]
     fn fallback_watch_needs_sustained_slowdown() {
         let mut watch = FallbackWatch::new(Some(ffmpeg_next::codec::Parameters::new()));
@@ -1669,7 +1685,7 @@ mod tests {
             watch.busy += 0.100;
             assert!(!watch.note_frame(Some(frame as f64 * 0.04)));
         }
-        // 窗口 50 帧 ≈ 2s：0.100s/帧忙时 → 5s ≫ 2.3s，触发
+        // 窗口 50 帧 ≈ 2s：0.100s/帧忙时 → 5s ≫ 2.1s，触发
         let mut triggered = false;
         for frame in FALLBACK_WARMUP_FRAMES + 1..=FALLBACK_WARMUP_FRAMES + 60 {
             watch.busy += 0.100;
@@ -1694,5 +1710,178 @@ mod tests {
             watch.busy += 0.100;
             assert!(!watch.note_frame(Some(frame as f64 * 0.04)));
         }
+    }
+
+    /// 编码一段 mpeg4（gop=25、52 帧 → 三个关键帧），供回退路径回归用
+    fn mpeg4_test_packets() -> Vec<Packet> {
+        fn drain(
+            encoder: &mut ffmpeg_next::codec::encoder::video::Encoder,
+            packets: &mut Vec<Packet>,
+        ) {
+            loop {
+                let mut pkt = ffmpeg_next::Packet::empty();
+                match encoder.receive_packet(&mut pkt) {
+                    Ok(()) => packets.push(Packet {
+                        data: pkt.data().unwrap_or_default().to_vec(),
+                        stream_index: 0,
+                        pts: pkt.pts(),
+                        dts: pkt.dts(),
+                        duration: None,
+                        time_base: ffmpeg_next::Rational::new(1, 25),
+                        is_key: pkt.is_key(),
+                    }),
+                    Err(e) if is_eagain(&e) => break,
+                    Err(ffmpeg_next::Error::Eof) => break,
+                    Err(e) => panic!("receive_packet: {e}"),
+                }
+            }
+        }
+
+        let codec = ffmpeg_next::codec::encoder::find_by_name("mpeg4").expect("mpeg4 encoder");
+        let mut ctx = ffmpeg_next::codec::Context::new_with_codec(codec);
+        ctx.set_time_base(ffmpeg_next::Rational::new(1, 25));
+        let mut builder = ctx.encoder().video().expect("video encoder builder");
+        builder.set_width(64);
+        builder.set_height(64);
+        builder.set_format(ffmpeg_next::format::Pixel::YUV420P);
+        builder.set_gop(25);
+        let mut encoder = builder.open().expect("open mpeg4 encoder");
+
+        let mut packets = Vec::new();
+        for i in 0..52i64 {
+            let mut frame =
+                ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 64, 64);
+            frame.set_pts(Some(i));
+            for (idx, byte) in frame.data_mut(0).iter_mut().enumerate() {
+                *byte = ((idx as i64 + i * 7) % 256) as u8;
+            }
+            encoder.send_frame(&frame).expect("send_frame");
+            drain(&mut encoder, &mut packets);
+        }
+        encoder.send_eof().expect("send_eof");
+        drain(&mut encoder, &mut packets);
+        packets
+    }
+
+    fn mpeg4_parameters() -> ffmpeg_next::codec::Parameters {
+        let mut parameters = ffmpeg_next::codec::Parameters::new();
+        unsafe {
+            let p = parameters.as_mut_ptr();
+            (*p).codec_type = ffmpeg_next::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*p).codec_id = ffmpeg_next::ffi::AVCodecID::AV_CODEC_ID_MPEG4;
+            (*p).width = 64;
+            (*p).height = 64;
+            (*p).format = ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as _;
+        }
+        parameters
+    }
+
+    /// 帧线程有流水线延迟：喂包直到出一帧，返回下一个待喂包的下标
+    fn feed_until_frame(
+        decoder: &mut FfmpegVideoDecoder,
+        packets: &[Packet],
+        mut index: usize,
+    ) -> usize {
+        while index < packets.len() {
+            decoder.submit_packet(&packets[index]).expect("submit");
+            index += 1;
+            match decoder.receive_frame() {
+                Ok(Some(_)) => return index,
+                Ok(None) => continue,
+                Err(e) => panic!("receive_frame: {e}"),
+            }
+        }
+        panic!("包喂完了也没出帧");
+    }
+
+    /// 决定回退后硬解继续出帧直到关键帧：非关键包不再被跳过（旧实现会把切换点
+    /// 前的整段画面冻住），关键帧处换解码器并通知引擎
+    #[test]
+    fn fallback_keeps_frames_flowing_until_keyframe() {
+        ffmpeg_next::init().expect("ffmpeg init");
+        let packets = mpeg4_test_packets();
+        let key_indices: Vec<usize> = packets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_key)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            key_indices.len() >= 2,
+            "需要两个关键帧，实际 {}",
+            key_indices.len()
+        );
+
+        let parameters = mpeg4_parameters();
+        let ctx = ffmpeg_next::codec::Context::from_parameters(parameters.clone()).expect("ctx");
+        let mut decoder =
+            FfmpegVideoDecoder::with_policy(ctx, Policy::SoftwareOnly).expect("software decoder");
+        // 喂满帧线程流水线，此后一包进一帧出
+        let next = feed_until_frame(&mut decoder, &packets, 0);
+
+        // 模拟 Auto 硬解看护触发后的状态：挂上重建参数、等待关键帧
+        decoder.fallback.parameters = Some(parameters);
+        decoder.await_key = true;
+
+        assert!(!packets[next].is_key, "预热不该跨过关键帧");
+        decoder
+            .submit_packet(&packets[next])
+            .expect("submit non-key");
+        assert!(
+            matches!(decoder.receive_frame(), Ok(Some(_))),
+            "等待回退期间非关键包必须照常出帧"
+        );
+        assert!(decoder.await_key, "关键帧之前不得换解码器");
+
+        let key = key_indices[1];
+        decoder
+            .submit_packet(&packets[key])
+            .expect("submit second key");
+        assert!(!decoder.await_key, "关键帧处必须完成切换");
+        let notice = decoder.take_notice().expect("回退必须通知引擎");
+        assert_eq!(notice.code, "hardware_decode_too_slow");
+        assert!(decoder.take_notice().is_none(), "通知只发一次");
+        // 新解码器同样有帧线程延迟，喂到出帧为止
+        feed_until_frame(&mut decoder, &packets, key + 1);
+    }
+
+    /// 重建失败保留原解码路径：通知只发一次，下一个关键帧重试
+    #[test]
+    fn fallback_failure_notifies_once_and_retries() {
+        ffmpeg_next::init().expect("ffmpeg init");
+        let packets = mpeg4_test_packets();
+        let key_indices: Vec<usize> = packets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.is_key)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            key_indices.len() >= 2,
+            "需要两个关键帧，实际 {}",
+            key_indices.len()
+        );
+
+        let ctx = ffmpeg_next::codec::Context::from_parameters(mpeg4_parameters()).expect("ctx");
+        let mut decoder =
+            FfmpegVideoDecoder::with_policy(ctx, Policy::SoftwareOnly).expect("software decoder");
+        // 不挂重建参数：rebuild_software 必然失败
+        decoder.await_key = true;
+
+        decoder
+            .submit_packet(&packets[key_indices[0]])
+            .expect("submit first key");
+        let notice = decoder.take_notice().expect("失败必须通知引擎");
+        assert_eq!(notice.code, "hardware_decode_fallback_failed");
+        assert!(decoder.await_key, "失败后应在下一个关键帧重试");
+
+        let key = key_indices[1];
+        decoder
+            .submit_packet(&packets[key])
+            .expect("submit second key");
+        assert!(decoder.take_notice().is_none(), "失败通知只发一次");
+        assert!(decoder.await_key);
+        // 原解码路径不受重建失败影响
+        feed_until_frame(&mut decoder, &packets, key + 1);
     }
 }

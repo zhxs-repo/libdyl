@@ -17,19 +17,12 @@ pub enum SourceKind {
     LocalPath,
     Http,
     Https,
-    /// HLS 流（`.m3u8`），通过 HTTP(S) 传输，由 FFmpeg hls demuxer 处理
-    Hls,
-    /// DASH 流（`.mpd`），通过 HTTP(S) 传输，由 FFmpeg dash demuxer 处理
-    Dash,
 }
 
 impl SourceKind {
     /// 是否需要走网络（决定读超时与看门狗宽限）。
     pub fn is_network(self) -> bool {
-        matches!(
-            self,
-            SourceKind::Http | SourceKind::Https | SourceKind::Hls | SourceKind::Dash
-        )
+        matches!(self, SourceKind::Http | SourceKind::Https)
     }
 }
 
@@ -58,16 +51,12 @@ pub fn classify(url: &str) -> Result<SourceKind> {
     let Some(scheme) = scheme_of(url) else {
         return Ok(SourceKind::LocalPath);
     };
-    let lower_url = url.to_ascii_lowercase();
-    let is_hls = lower_url.ends_with(".m3u8") || lower_url.contains(".m3u8?");
-    let is_dash = lower_url.ends_with(".mpd") || lower_url.contains(".mpd?");
     match scheme.as_str() {
         "http" | "https" if protocol_available(&scheme) => {
-            if is_hls {
-                Ok(SourceKind::Hls)
-            } else if is_dash {
-                Ok(SourceKind::Dash)
-            } else if scheme == "http" {
+            // 不按后缀细分 HLS/DASH：FFmpeg 会按内容探测 demuxer，后缀启发式
+            // 既脆弱（漏 fragment/路径参数、误命中查询串）又无行为收益
+            // （is_network 对 http(s) 本就为真）。范围仍是 HTTP(S) 直链。
+            if scheme == "http" {
                 Ok(SourceKind::Http)
             } else {
                 Ok(SourceKind::Https)
@@ -124,37 +113,26 @@ mod tests {
         assert!(is_network_url("https://example.com/a.mp4"));
     }
 
+    /// 清单 URL 不按后缀细分：HLS/DASH 由 FFmpeg 按内容探测，这里只判网络来源
     #[test]
-    fn hls_urls_are_classified_by_m3u8_suffix() {
+    fn manifest_urls_are_plain_http_sources() {
         assert_eq!(
             classify("http://example.com/stream.m3u8").unwrap(),
-            SourceKind::Hls
+            SourceKind::Http
         );
         assert_eq!(
-            classify("https://example.com/stream.m3u8").unwrap(),
-            SourceKind::Hls
+            classify("https://example.com/stream.m3u8?token=abc").unwrap(),
+            SourceKind::Https
         );
-        assert_eq!(
-            classify("http://example.com/stream.m3u8?token=abc").unwrap(),
-            SourceKind::Hls
-        );
-        assert!(is_network_url("https://example.com/stream.m3u8"));
-    }
-
-    #[test]
-    fn dash_urls_are_classified_by_mpd_suffix() {
         assert_eq!(
             classify("http://example.com/stream.mpd").unwrap(),
-            SourceKind::Dash
+            SourceKind::Http
         );
         assert_eq!(
-            classify("https://example.com/stream.mpd").unwrap(),
-            SourceKind::Dash
+            classify("https://example.com/stream.mpd?token=abc").unwrap(),
+            SourceKind::Https
         );
-        assert_eq!(
-            classify("http://example.com/stream.mpd?token=abc").unwrap(),
-            SourceKind::Dash
-        );
+        assert!(is_network_url("https://example.com/stream.m3u8"));
     }
 
     #[test]

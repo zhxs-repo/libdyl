@@ -294,6 +294,11 @@ fn switching_decode_while_playing_keeps_the_position_and_events_unique() {
         final_position >= before_position.saturating_sub(100),
         "切解码方式后最终位置 {final_position}ms 回跳到 before_position {before_position}ms 以下：{positions:?}"
     );
+    // 恢复之外还必须继续推进：冻结在 before_position 也算"恢复"，但那是停摆不是播放
+    assert!(
+        final_position > before_position,
+        "切解码方式后位置必须继续推进，最终 {final_position}ms 应大于切换前 {before_position}ms：{positions:?}"
+    );
     assert_eq!(engine.snapshot().state, PlayerState::Playing);
     engine.destroy();
 }

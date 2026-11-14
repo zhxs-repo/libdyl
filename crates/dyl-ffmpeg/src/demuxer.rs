@@ -18,6 +18,17 @@ const NETWORK_RW_TIMEOUT_US: i64 = 15_000_000;
 /// 连接中途断开时 FFmpeg 会带 Range 头重连，播放器不必从 0 重开。
 const NETWORK_RECONNECT_DELAY_MAX: i64 = 4;
 
+/// 探测升级的上限：`(probesize 字节, max_analyze_duration 微秒)`。
+///
+/// FFmpeg 的默认快速探测（5 MB / 5 s）对中途开录的文件、拼接的 TS、无索引
+/// 裸流常常读不到宽高与帧率，表现为快照里 0×0 或 0 fps。升级只在快速探测
+/// 确实缺参数时发生，正常文件不会多读一个字节。
+///
+/// 网络来源给得保守得多：probesize 直接等于"最多先下多少才开始播"，
+/// 100 MB 会让起播等待变得不可接受。
+const LOCAL_PROBE_ESCALATED: (i64, i64) = (100_000_000, 100_000_000);
+const NETWORK_PROBE_ESCALATED: (i64, i64) = (16_000_000, 30_000_000);
+
 /// 打开时的选轨意图。
 ///
 /// 每一项 `None` 表示沿用内核自动选择（容器 default 标记优先，其次容器顺序）；
@@ -116,7 +127,25 @@ impl Demuxer for FfmpegDemuxer {
         tracing::info!("FfmpegDemuxer::open({}) {:?}", url, selection);
 
         let kind = classify(url)?;
-        let (input, interrupt) = open_input(url, kind, shutdown)?;
+        let (mut input, interrupt) = open_input(url, kind, shutdown)?;
+
+        // 快速探测没拿到视频的宽高/帧率时升级一次再读。中途开录的文件、
+        // 拼接 TS、无索引裸流都会这样。升级会原地补齐 codecpar，所以必须在
+        // 任何地方读取流参数之前做。
+        if probe_needs_escalation(&input) {
+            tracing::info!("demuxer: 视频参数不完整，升级 probesize 后重探");
+            if escalate_probe(&mut input, kind) {
+                if probe_needs_escalation(&input) {
+                    tracing::warn!(
+                        "demuxer: 升级探测后视频宽高/帧率仍缺失，渲染端将以解码首帧的尺寸为准"
+                    );
+                } else {
+                    tracing::info!("demuxer: 升级探测补齐了视频参数");
+                }
+            } else {
+                tracing::warn!("demuxer: 升级探测失败，沿用快速探测的结果");
+            }
+        }
 
         // duration is in AV_TIME_BASE (microseconds)
         let duration = input.duration() as f64 / 1_000_000.0;
@@ -132,6 +161,14 @@ impl Demuxer for FfmpegDemuxer {
                 // 附件（字体/封面）与数据流不是可播放轨道
                 _ => continue,
             };
+            // 封面图在容器里就是一条 video 流（一张 JPEG/PNG），但它不是可播放
+            // 视频：选中它会让播放器把一张静止图当视频解，宽高与时长都对不上。
+            // m4a / mp3 / flac 带封面是极常见的组合。
+            if kind == TrackKind::Video && stream.disposition().contains(Disposition::ATTACHED_PIC)
+            {
+                tracing::info!("demuxer: 跳过封面图流 {}（attached_pic）", i);
+                continue;
+            }
             probes.push(StreamProbe {
                 index: i,
                 kind,
@@ -205,8 +242,7 @@ impl Demuxer for FfmpegDemuxer {
                         pixel_format = PixelFormat::from(ffmpeg_next::format::Pixel::from(av_fmt));
                     }
 
-                    fps = stream.avg_frame_rate().numerator() as f64
-                        / stream.avg_frame_rate().denominator().max(1) as f64;
+                    fps = stream_fps(&stream);
 
                     // Create codec context for decoder initialization
                     let ctx = ffmpeg_next::codec::Context::from_parameters(params)
@@ -552,6 +588,84 @@ fn open_error(url: &str, code: c_int) -> DylError {
         return DylError::Demux(format!("interrupted while opening {url}"));
     }
     DylError::Demux(format!("failed to open {url}: {error}"))
+}
+
+/// 帧率取信：1..=240 fps 之外的一律当作「没探测到」。
+///
+/// 容器时基是 1000/1 的流（部分 TS / FLV / 裸流）会把 `r_frame_rate` 报成
+/// 1000 fps；`avg_frame_rate` 在无索引的流上又常常是 0/0。两种都不能拿去
+/// 驱动播放时钟。
+fn sane_fps(num: i64, den: i64) -> Option<f64> {
+    if num <= 0 || den <= 0 {
+        return None;
+    }
+    let f = num as f64 / den as f64;
+    (1.0..=240.0).contains(&f).then_some(f)
+}
+
+/// 帧率：优先流级 `r_frame_rate`，退回 `avg_frame_rate`，两者都不可信则 0。
+fn stream_fps(stream: &ffmpeg_next::format::stream::Stream) -> f64 {
+    let rate = stream.rate();
+    let avg = stream.avg_frame_rate();
+    sane_fps(rate.numerator() as i64, rate.denominator() as i64)
+        .or_else(|| sane_fps(avg.numerator() as i64, avg.denominator() as i64))
+        .unwrap_or(0.0)
+}
+
+/// 视频流的宽高与帧率是否都已探测到。
+fn video_params_complete(stream: &ffmpeg_next::format::stream::Stream) -> bool {
+    let codecpar = unsafe { (*stream.as_ptr()).codecpar };
+    if codecpar.is_null() {
+        return false;
+    }
+    let (w, h) = unsafe { ((*codecpar).width, (*codecpar).height) };
+    w > 0 && h > 0 && stream_fps(stream) > 0.0
+}
+
+/// 是否有一条**可播放**的视频流缺关键参数。
+///
+/// 封面图流（`attached_pic`）不参与：它的宽高对播放没有意义，也不该因为
+/// 它触发一次 100 MB 的重探。
+fn probe_needs_escalation(input: &ffmpeg_next::format::context::Input) -> bool {
+    for stream in input.streams() {
+        if stream.parameters().medium() != ffmpeg_next::media::Type::Video {
+            continue;
+        }
+        if stream.disposition().contains(Disposition::ATTACHED_PIC) {
+            continue;
+        }
+        if !video_params_complete(&stream) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 抬升 `probesize` / `max_analyze_duration` 后重跑 `avformat_find_stream_info`。
+///
+/// 返回重探是否成功。这里用 `av_opt_set_int` 而不是打开时的字典：上下文已经
+/// 开着，重新 open 会丢掉已读的数据与中断回调，而这两个选项是 `AVFormatContext`
+/// 的 AVOption，重探时直接生效。
+fn escalate_probe(input: &mut ffmpeg_next::format::context::Input, kind: SourceKind) -> bool {
+    use ffmpeg_next::ffi;
+
+    let (probesize, analyze_us) = if kind.is_network() {
+        NETWORK_PROBE_ESCALATED
+    } else {
+        LOCAL_PROBE_ESCALATED
+    };
+    // Safety: ctx 由 input 持有，input 在本函数内不会移动/释放
+    let ctx = unsafe { input.as_mut_ptr() };
+    if ctx.is_null() {
+        return false;
+    }
+    let probesize_key = CString::new("probesize").expect("no NUL");
+    let analyze_key = CString::new("max_analyze_duration").expect("no NUL");
+    unsafe {
+        ffi::av_opt_set_int(ctx as *mut c_void, probesize_key.as_ptr(), probesize, 0);
+        ffi::av_opt_set_int(ctx as *mut c_void, analyze_key.as_ptr(), analyze_us, 0);
+        ffi::avformat_find_stream_info(ctx, std::ptr::null_mut()) >= 0
+    }
 }
 
 /// open() 第一遍收集的选轨依据
@@ -947,5 +1061,19 @@ mod tests {
             track_codec_label(TrackKind::Subtitle, ffmpeg_next::codec::Id::ASS),
             "ass"
         );
+    }
+
+    /// 1000/1 是容器时基伪装成帧率的典型值；0/0 是「没探测到」。
+    /// 两者都不能拿去驱动播放时钟，必须当作缺失。
+    #[test]
+    fn fps_sanity_rejects_timebase_artifacts() {
+        assert_eq!(sane_fps(25, 1), Some(25.0));
+        assert_eq!(sane_fps(30000, 1001), Some(30_000.0 / 1001.0));
+        assert_eq!(sane_fps(24, 1), Some(24.0));
+        assert_eq!(sane_fps(1000, 1), None, "1000/1 是时基，不是帧率");
+        assert_eq!(sane_fps(0, 0), None);
+        assert_eq!(sane_fps(0, 1), None);
+        assert_eq!(sane_fps(-30, 1), None);
+        assert_eq!(sane_fps(1, 1000), None, "0.001 fps 不可信");
     }
 }
