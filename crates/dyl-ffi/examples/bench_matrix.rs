@@ -306,7 +306,6 @@ fn ms_field(row: &Value, key: &str) -> String {
 
 fn parse_args() -> Result<Args, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let mut positional = argv.iter().filter(|a| !a.starts_with('-')).cloned();
     let mut args = Args {
         manifest: PathBuf::from(MANIFEST_DEFAULT),
         out: PathBuf::from(OUT_DEFAULT),
@@ -316,12 +315,10 @@ fn parse_args() -> Result<Args, String> {
         http_base: None,
         cases_limit: usize::MAX,
     };
-    if let Some(m) = positional.next() {
-        args.manifest = PathBuf::from(m);
-    }
-    if let Some(o) = positional.next() {
-        args.out = PathBuf::from(o);
-    }
+    // 顺序扫描：flag 连同它的值一起消费，剩下没被消费的非 flag 参数才是位置参数。
+    // 不能先 filter 出所有非 flag 项——那会把 `--decode auto` 的 "auto"、
+    // `--hold 2` 的 "2" 也收进位置参数，manifest/out 就此错位
+    let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < argv.len() {
         let flag = argv[i].as_str();
@@ -350,8 +347,21 @@ fn parse_args() -> Result<Args, String> {
                 args.cases_limit = value.parse().map_err(|_| "--limit 需要整数")?;
                 i += 2;
             }
-            _ => i += 1,
+            other => {
+                if other.starts_with('-') {
+                    return Err(format!("未知参数 {other}"));
+                }
+                positional.push(other.to_string());
+                i += 1;
+            }
         }
+    }
+    let mut positional = positional.into_iter();
+    if let Some(m) = positional.next() {
+        args.manifest = PathBuf::from(m);
+    }
+    if let Some(o) = positional.next() {
+        args.out = PathBuf::from(o);
     }
     Ok(args)
 }
