@@ -335,6 +335,8 @@ class DylClient {
       execute(SetAudioDelayCommand(delayMs));
 
   /// Set A-B loop. Both null clears the loop; both set with a < b activates it.
+  /// Anything else fails with `invalid_argument`. The loop uses internal seeks
+  /// (no `seek_completed` events) and is cleared when a new file is loaded.
   Future<CommandCompletedEvent> setAbLoop({int? aMs, int? bMs}) =>
       execute(SetAbLoopCommand(aMs: aMs, bMs: bMs));
 

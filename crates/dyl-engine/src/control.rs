@@ -98,6 +98,9 @@ pub(crate) struct ControlState {
     pending_seek: Option<PendingSeek>,
     pending_switch: Option<PendingSwitch>,
     superseded_seeks: Vec<PendingSeek>,
+    /// AB 循环在途的内部 seek（不建 pending_seek：它不对应任何命令，
+    /// 落地时只更新位置，不发 SeekCompleted / command_completed）
+    ab_seek_tag: Option<u64>,
 }
 
 impl ControlState {
@@ -141,6 +144,7 @@ impl ControlState {
             pending_seek: None,
             pending_switch: None,
             superseded_seeks: Vec::new(),
+            ab_seek_tag: None,
         }
     }
 
@@ -418,6 +422,8 @@ impl ControlState {
                 if let Some(previous) = self.pending_seek.take() {
                     self.superseded_seeks.push(previous);
                 }
+                // 用户 seek 优先：在途的 AB 内部 seek 作废（其 SeekApplied 会被忽略）
+                self.ab_seek_tag = None;
                 let tag = self.next_seek_tag();
                 *pipeline.seek_request.lock() = Some(SeekRequest {
                     target: target as f64 / 1000.0,
@@ -670,9 +676,6 @@ impl ControlState {
             .subtitle
             .lock()
             .set_subtitle_delay(delay_ms);
-        if let Some(pipeline) = &self.pipeline {
-            pipeline.set_subtitle_delay(delay_ms);
-        }
         self.publish();
         self.emit_settings();
         self.complete_ok(request_id, op);
@@ -691,10 +694,23 @@ impl ControlState {
 
     fn cmd_set_ab_loop(&mut self, request_id: u64, a_ms: Option<u64>, b_ms: Option<u64>) {
         let op = CommandOp::SetAbLoop;
-        self.ab_loop = match (a_ms, b_ms) {
+        let ab_loop = match (a_ms, b_ms) {
+            (None, None) => None,
             (Some(a), Some(b)) if a < b => Some(AbLoop { a_ms: a, b_ms: b }),
-            _ => None,
+            _ => {
+                self.complete_error(
+                    request_id,
+                    op,
+                    &EngineError::invalid_argument(
+                        "ab_loop requires both a_ms and b_ms with a_ms < b_ms, or neither to clear",
+                    ),
+                );
+                return;
+            }
         };
+        // 换区间或清除时，在途的内部 seek 作废，避免旧目标落地后污染位置
+        self.ab_seek_tag = None;
+        self.ab_loop = ab_loop;
         self.publish();
         self.emit_settings();
         self.complete_ok(request_id, op);
@@ -734,6 +750,9 @@ impl ControlState {
                         self.pending_load = None;
                         self.position_ms = 0;
                         self.last_error = None;
+                        // A/B 点属于旧文件的时间轴，新文件不带入
+                        self.ab_loop = None;
+                        self.ab_seek_tag = None;
                         self.events.emit(Event::FileLoaded(FileLoaded {
                             request_id: ready.request_id,
                             source: ready.source.clone(),
@@ -946,7 +965,6 @@ impl ControlState {
             pipeline.set_volume(self.volume);
             pipeline.set_mute(self.muted);
             pipeline.set_speed(self.speed);
-            pipeline.set_subtitle_delay(self.subtitle_delay_ms);
             pipeline.set_audio_delay(self.audio_delay_ms);
         }
     }
@@ -1037,6 +1055,20 @@ impl ControlState {
     }
 
     fn on_seek_applied(&mut self, tag: u64, position_secs: f64) {
+        // AB 循环的内部 seek：没有对应命令，只把位置更新到落地点，
+        // 不发 SeekCompleted / command_completed
+        if self.ab_seek_tag == Some(tag) {
+            self.ab_seek_tag = None;
+            let mut actual_ms = secs_to_ms(position_secs);
+            if self.duration_ms > 0 {
+                actual_ms = actual_ms.min(self.duration_ms);
+            }
+            self.position_ms = actual_ms;
+            self.publish();
+            self.emit_position(actual_ms);
+            return;
+        }
+
         // 换轨的位置恢复走的是内部 seek（不建 pending_seek）：它一落地就解除位置钉，
         // 快照改读真实位置。这条命令自己只有那一个 command_completed。
         if let Some(pending) = self.pending_switch.as_mut() {
@@ -1078,6 +1110,11 @@ impl ControlState {
     }
 
     fn on_seek_failed(&mut self, tag: u64, message: String) {
+        // AB 循环内部 seek 失败：解除记账即可，下一次 tick 到 B 点会重试
+        if self.ab_seek_tag == Some(tag) {
+            self.ab_seek_tag = None;
+            return;
+        }
         let Some(pending) = self
             .pending_seek
             .as_ref()
@@ -1129,28 +1166,28 @@ impl ControlState {
         if self.state != PlayerState::Playing || self.pipeline.is_none() {
             return;
         }
-        // AB 循环：播放到 B 点自动跳回 A 点
+        // AB 循环：播放到 B 点自动跳回 A 点。
+        // 有用户 seek / 换轨恢复 / 上一次 AB seek 在途时不叠加：内部 seek 不建
+        // pending_seek（没有对应命令），靠 ab_seek_tag 单独记账，落地前不再发新的
         if let Some(ab) = self.ab_loop {
-            let live = self.live_position_ms();
-            if live >= ab.b_ms {
-                let Some(pipeline) = self.pipeline.clone() else {
-                    return;
-                };
-                let tag = self.next_seek_tag();
-                *pipeline.seek_request.lock() = Some(SeekRequest {
-                    target: ab.a_ms as f64 / 1000.0,
-                    from: live as f64 / 1000.0,
-                    tag,
-                    exact: true,
-                });
-                self.pending_seek = Some(PendingSeek {
-                    request_id: 0,
-                    op: CommandOp::Seek,
-                    tag,
-                    from_ms: live,
-                    to_ms: ab.a_ms,
-                    mode: SeekMode::Exact,
-                });
+            if self.pending_seek.is_none()
+                && self.pending_switch.is_none()
+                && self.ab_seek_tag.is_none()
+            {
+                let live = self.live_position_ms();
+                if live >= ab.b_ms {
+                    let Some(pipeline) = self.pipeline.clone() else {
+                        return;
+                    };
+                    let tag = self.next_seek_tag();
+                    *pipeline.seek_request.lock() = Some(SeekRequest {
+                        target: ab.a_ms as f64 / 1000.0,
+                        from: live as f64 / 1000.0,
+                        tag,
+                        exact: true,
+                    });
+                    self.ab_seek_tag = Some(tag);
+                }
             }
         }
         self.publish();
@@ -1185,6 +1222,7 @@ impl ControlState {
     fn retire_current_pipeline(&mut self) {
         // 退役的管线不可能再报告它在途的 seek，位置钉也就没了兑现对象
         self.pending_switch = None;
+        self.ab_seek_tag = None;
         if let Some(pipeline) = self.pipeline.take() {
             self.shared.retire_pipeline(pipeline);
         }

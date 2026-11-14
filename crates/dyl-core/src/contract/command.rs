@@ -103,7 +103,9 @@ pub enum Command {
     SetAudioDelay {
         delay_ms: i64,
     },
-    /// AB 循环：设置 A/B 点后播放到 B 自动跳回 A。`a_ms`/`b_ms` 都为 `None` 清除循环。
+    /// AB 循环：设置 A/B 点后播放到 B 自动跳回 A。`a_ms`/`b_ms` 都为 `None` 清除循环；
+    /// 只给一个或 `a_ms >= b_ms` 为非法参数（`invalid_argument`）。循环是内部 seek，
+    /// 不产生 `seek_completed` 事件；加载新文件时自动清除。
     SetAbLoop {
         a_ms: Option<u64>,
         b_ms: Option<u64>,
