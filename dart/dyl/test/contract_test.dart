@@ -368,7 +368,7 @@ void main() {
     });
 
     test('ABI version packs as major<<16|minor<<8|patch', () {
-      expect(AbiVersion.current.packed, 6 << 8);
+      expect(AbiVersion.current.packed, 7 << 8);
       expect(AbiVersion.current.isCompatible, isTrue);
       expect(const AbiVersion(major: 6, minor: 0, patch: 0).isCompatible,
           isFalse);
