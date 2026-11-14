@@ -179,12 +179,14 @@ mod aaudio_sys {
 }
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use dyl_core::{DylError, Result};
 use dyl_ffmpeg::AudioFrame;
 use parking_lot::Mutex;
 
+use crate::resample::AudioConverter;
 use crate::traits::AudioOutput;
 
 /// AAudio ring buffer 容量上限：约 1 秒的立体声 48kHz 采样
@@ -205,13 +207,14 @@ pub struct AaudioOutput {
     /// 设备声道布局的待播采样：写入 AAudio 前的本地缓冲
     buffer: Arc<Mutex<VecDeque<f32>>>,
     volume: Arc<std::sync::atomic::AtomicU32>,
-    /// 源采样率 / 声道数（来自媒体）
-    sample_rate: u32,
-    channels: u32,
-    /// 流的实际采样率 / 声道数：AAudio 可能拒绝单声道（-889）后自行改开立体声，
-    /// 与源布局不一致时必须在这里转换，否则按单声道解释立体声流会越界读
-    device_rate: u32,
-    device_channels: u32,
+    /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）
+    speed: Arc<AtomicU32>,
+    /// 声道映射 + 重采样 + 限幅：设备音道/采样率与源不一致时全部在这里完成
+    converter: AudioConverter,
+    /// 转换结果的复用缓冲（音频路径上不允许逐帧分配）
+    scratch: Vec<f32>,
+    /// 写设备前的音量 scratch，同样复用
+    device_scratch: Vec<f32>,
 }
 
 // SAFETY: AaudioOutput is only used from a dedicated audio thread.
@@ -226,11 +229,23 @@ impl AaudioOutput {
             stream: None,
             buffer: Arc::new(Mutex::new(VecDeque::new())),
             volume: Arc::new(std::sync::atomic::AtomicU32::new(1.0f32.to_bits())),
-            sample_rate: 0,
-            channels: 0,
-            device_rate: 0,
-            device_channels: 0,
+            speed: Arc::new(AtomicU32::new(1000)),
+            // 未 init 前按 1:1 透传
+            converter: AudioConverter::new(0, 1, 0, 1),
+            scratch: Vec::new(),
+            device_scratch: Vec::new(),
         }
+    }
+
+    /// 这一帧写入后会占用多少**设备帧**（含声道映射、重采样与变速）
+    ///
+    /// 与 `CpalOutput::device_frames_for` 同一判据，`accepts` 与 `write` 共用，
+    /// 背压记账和实际写入才不会错位。
+    fn device_frames_for(&self, frame: &AudioFrame) -> usize {
+        let src_ch = self.converter.mix().in_ch().max(1);
+        let src_frames = frame.samples.len() / src_ch;
+        self.converter
+            .frames_for(src_frames, self.speed.load(Ordering::Relaxed))
     }
 }
 
@@ -244,12 +259,11 @@ impl Default for AaudioOutput {
 #[cfg(target_os = "android")]
 impl AudioOutput for AaudioOutput {
     fn init(&mut self, sample_rate: u32, channels: u32) -> Result<()> {
-        self.sample_rate = sample_rate;
-        self.channels = channels;
-        self.device_rate = sample_rate;
-        self.device_channels = channels;
-
         tracing::info!("AaudioOutput::init: {}Hz {}ch", sample_rate, channels);
+
+        // 流的实际格式（设备可能不接受请求的采样率/声道数）
+        let mut dev_rate = sample_rate;
+        let mut dev_ch = channels;
 
         unsafe {
             let mut builder: *mut aaudio_sys::AAudioStreamBuilder = std::ptr::null_mut();
@@ -293,7 +307,7 @@ impl AudioOutput for AaudioOutput {
             // 获取实际采样率（可能与请求的不同）
             let actual_rate = aaudio_sys::AAudioStream_getSampleRate(stream);
             if actual_rate > 0 {
-                self.device_rate = actual_rate as u32;
+                dev_rate = actual_rate as u32;
                 tracing::info!(
                     "AaudioOutput: actual sample rate = {}Hz (requested {}Hz)",
                     actual_rate,
@@ -306,7 +320,7 @@ impl AudioOutput for AaudioOutput {
             // AAudioStream_write 会按立体声解释单声道缓冲，多读出一倍采样。
             let actual_channels = aaudio_sys::AAudioStream_getChannelCount(stream);
             if actual_channels > 0 {
-                self.device_channels = actual_channels as u32;
+                dev_ch = actual_channels as u32;
                 if actual_channels as u32 != channels {
                     tracing::info!(
                         "AaudioOutput: actual channel count = {} (requested {})",
@@ -327,61 +341,39 @@ impl AudioOutput for AaudioOutput {
             }
 
             self.stream = Some(stream);
-            tracing::info!("AaudioOutput: stream started");
         }
+
+        // 转换器按流的**实际**格式建：设备改了声道数而转换器仍按源声道写入，
+        // AAudioStream_write 会按设备的声道数解释缓冲区，越界读或静音。
+        self.converter = AudioConverter::new(sample_rate, channels, dev_rate, dev_ch);
+        tracing::info!(
+            "AaudioOutput: stream started ({}Hz {}ch → 设备 {}Hz {}ch)",
+            sample_rate,
+            channels,
+            dev_rate,
+            dev_ch
+        );
 
         Ok(())
     }
 
     fn write(&mut self, frame: &AudioFrame) -> Result<()> {
+        let out_ch = self.converter.mix().out_ch().max(1);
+
+        // 声道映射 + 重采样 + 限幅都收在转换器里，缓冲里始终是设备帧的交错布局
+        self.converter
+            .convert(frame, self.speed.load(Ordering::Relaxed), &mut self.scratch);
+
         let mut buf = self.buffer.lock();
+        buf.extend(self.scratch.iter().copied());
 
-        let src_ch = self.channels.max(1) as usize;
-        let out_ch = self.device_channels.max(1) as usize;
-        let src_frames = frame.samples.len() / src_ch;
-        let resample = self.device_rate > 0 && self.device_rate != self.sample_rate;
-        let out_frames = if resample {
-            (src_frames as f64 * self.device_rate as f64 / self.sample_rate as f64).ceil() as usize
-        } else {
-            src_frames
-        };
-
-        // 推入采样到本地缓冲：重采样（线性插值）与声道映射一起做，
-        // 缓冲里始终是设备格式的采样
-        for i in 0..out_frames {
-            let (src_idx, frac) = if resample {
-                let src_pos = i as f64 * self.sample_rate as f64 / self.device_rate as f64;
-                let idx = src_pos.floor() as usize;
-                (idx, (src_pos - idx as f64) as f32)
-            } else {
-                (i, 0.0)
-            };
-
-            for ch in 0..out_ch {
-                // 源声道不足时复制最后一个声道（单声道 → 立体声即左右双写）
-                let source_ch = ch.min(src_ch - 1);
-                let s0 = frame
-                    .samples
-                    .get(src_idx * src_ch + source_ch)
-                    .copied()
-                    .unwrap_or(0.0);
-                let s = if frac > 0.0 {
-                    let s1 = frame
-                        .samples
-                        .get((src_idx + 1) * src_ch + source_ch)
-                        .copied()
-                        .unwrap_or(0.0);
-                    s0 + (s1 - s0) * frac
-                } else {
-                    s0
-                };
-                buf.push_back(s);
-            }
-        }
-
-        // Ring buffer 上限保护
-        while buf.len() > MAX_BUFFER_SAMPLES {
-            buf.pop_front();
+        // Ring buffer 上限保护：按整帧丢弃保持交错布局的声道对齐。
+        // 逐个 pop 会把左右声道错位，之后的音频全部变成噪声
+        let excess = buf.len().saturating_sub(MAX_BUFFER_SAMPLES);
+        let dropped_samples = excess - excess % out_ch;
+        if dropped_samples > 0 {
+            buf.drain(..dropped_samples);
+            tracing::warn!("AaudioOutput: 缓冲超限，丢弃 {dropped_samples} 个采样");
         }
 
         // 从 buffer 写入 AAudio stream：
@@ -397,22 +389,22 @@ impl AudioOutput for AaudioOutput {
                 unsafe { aaudio_sys::AAudioStream_getFramesPerBurst(stream) }.max(1) as usize;
             let max_frames = burst * 4;
 
+            // 复用设备 scratch：音频路径上不允许逐帧分配（技术债文档 2.4）
+            let mut device = std::mem::take(&mut self.device_scratch);
             loop {
                 let writable_frames = (buf.len() / out_ch).min(max_frames);
                 if writable_frames == 0 {
                     break;
                 }
                 let sample_count = writable_frames * out_ch;
-                let mut scratch: Vec<f32> = Vec::with_capacity(sample_count);
-                for s in buf.iter().take(sample_count) {
-                    scratch.push(*s * vol);
-                }
+                device.clear();
+                device.extend(buf.iter().take(sample_count).map(|s| *s * vol));
 
                 // 100ms 超时：阻塞至写完或超时，partial write 由残余保留兜底
                 let written = unsafe {
                     aaudio_sys::AAudioStream_write(
                         stream,
-                        scratch.as_ptr() as *const std::ffi::c_void,
+                        device.as_ptr() as *const std::ffi::c_void,
                         writable_frames as i32,
                         100_000_000,
                     )
@@ -433,6 +425,7 @@ impl AudioOutput for AaudioOutput {
                     break;
                 }
             }
+            self.device_scratch = device;
         }
 
         Ok(())
@@ -448,20 +441,11 @@ impl AudioOutput for AaudioOutput {
         f32::from_bits(self.volume.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// 本地 ring buffer 装得下这一帧（重采样、按设备声道布局后）吗
+    /// 本地 ring buffer 装得下这一帧（重采样、变速、按设备声道布局后）吗
     fn accepts(&self, frame: &AudioFrame) -> bool {
-        let src_ch = self.channels.max(1) as usize;
-        let out_ch = self.device_channels.max(1) as usize;
-        let src_frames = frame.samples.len() / src_ch;
-        let out_frames =
-            if self.sample_rate > 0 && self.device_rate > 0 && self.device_rate != self.sample_rate
-            {
-                (src_frames as f64 * (self.device_rate as f64 / self.sample_rate as f64)).ceil()
-                    as usize
-            } else {
-                src_frames
-            };
-        self.buffer.lock().len() + out_frames * out_ch <= MAX_BUFFER_SAMPLES
+        let out_ch = self.converter.mix().out_ch().max(1);
+        let needed = self.device_frames_for(frame) * out_ch;
+        self.buffer.lock().len() + needed <= MAX_BUFFER_SAMPLES
     }
 
     /// 冻结设备消费：不暂停的话缓冲里的旧采样会在"已暂停"期间继续放完
@@ -496,6 +480,9 @@ impl AudioOutput for AaudioOutput {
     /// 本地 ring buffer 同样要清空——两层里存的都是旧位置的采样。
     fn flush(&mut self) {
         self.buffer.lock().clear();
+        // 重采样器的历史必须一起清：seek 后带着旧位置的尾巴会让新位置
+        // 开头混进几十毫秒的旧音频
+        self.converter.reset();
         if let Some(stream) = self.stream {
             unsafe {
                 let stop = aaudio_sys::AAudioStream_requestStop(stream);
@@ -513,6 +500,14 @@ impl AudioOutput for AaudioOutput {
     /// EOF 排空判定：本地缓冲是否还有未写入设备的采样
     fn has_pending_audio(&self) -> bool {
         !self.buffer.lock().is_empty()
+    }
+
+    /// 注入播放速率的共享 Arc（由 Pipeline 在 start 时调用）
+    ///
+    /// AAudio 走挂钟主时钟、没有音频时钟，故只需更新写入侧的重采样比例；
+    /// 变速后 `audio_output_loop` 会 flush 掉按旧速率重采样的缓冲。
+    fn set_speed_arc(&mut self, speed: Arc<AtomicU32>) {
+        self.speed = speed;
     }
 }
 
@@ -539,7 +534,6 @@ mod tests {
     fn test_aaudio_output_new() {
         let output = AaudioOutput::new();
         assert!((output.volume() - 1.0).abs() < 0.001);
-        assert_eq!(output.sample_rate, 0);
         assert!(output.stream.is_none());
     }
 

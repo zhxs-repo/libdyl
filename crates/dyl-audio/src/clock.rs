@@ -47,7 +47,6 @@ pub struct AudioClock {
     epoch: Arc<AtomicU64>,
     created: Arc<Instant>,
     last_move_ms: Arc<AtomicU64>,
-    audio_delay_ms: Arc<AtomicI64>,
     /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）
     speed: Arc<AtomicU32>,
 }
@@ -70,7 +69,6 @@ impl AudioClock {
             epoch: Arc::new(AtomicU64::new(0)),
             created: Arc::new(Instant::now()),
             last_move_ms: Arc::new(AtomicU64::new(0)),
-            audio_delay_ms: Arc::new(AtomicI64::new(0)),
             speed: Arc::new(AtomicU32::new(1000)),
         }
     }
@@ -140,6 +138,10 @@ impl AudioClock {
 
     /// 当前媒体位置（秒）。尚无带时间戳的音频写入时返回 `None`，
     /// 调用方据此回退到挂钟。
+    ///
+    /// 这是纯粹的"扬声器放到第几秒"：音频延迟是音画相对偏移，由 AVSync 在
+    /// 比对视频帧时单独扣除，不掺进这里 —— 否则对外报告的播放位置与 EOF
+    /// 判定都会跟着延迟漂移。
     pub fn position(&self) -> Option<f64> {
         if !self.ready.load(Ordering::Acquire) {
             return None;
@@ -150,14 +152,8 @@ impl AudioClock {
         }
         let pts = f64::from_bits(self.end_pts.load(Ordering::Acquire));
         let backlog = self.backlog.load(Ordering::Acquire).max(0);
-        let delay_ms = self.audio_delay_ms.load(Ordering::Relaxed);
         let speed = self.speed.load(Ordering::Relaxed) as f64 / 1000.0;
-        Some(pts - backlog as f64 * speed / rate as f64 - delay_ms as f64 / 1000.0)
-    }
-
-    /// 设置音频延迟（毫秒；正数推迟、负数提前）
-    pub fn set_audio_delay(&self, delay_ms: i64) {
-        self.audio_delay_ms.store(delay_ms, Ordering::Relaxed);
+        Some(pts - backlog as f64 * speed / rate as f64)
     }
 
     /// 替换播放速率的共享 Arc（由 Pipeline 在 start 时注入，所有克隆体共享同一份）
