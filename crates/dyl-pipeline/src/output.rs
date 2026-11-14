@@ -133,8 +133,8 @@ pub fn render_loop(
         }
         play_tick = std::time::Instant::now();
 
-        // EOF 以媒体主时钟为准：position 是最后上屏的视频帧 PTS，它领先设备里
-        // 尚未放完的音频（最多 1 秒），按它判结束会把结尾的声音连同线程一起切掉。
+        // EOF 以媒体主时钟为准：它是"扬声器现在放到第几秒"（position 也报它），
+        // 按上屏帧 PTS 判结束会把设备里尚未放完的结尾音频连同线程一起切掉。
         // 挂钟仅在无音频时兜底，并留 2 秒余量防止设备停摆永远等不到
         let master_clock = pipeline.avsync.master_clock();
         let eof_due = started
@@ -189,9 +189,13 @@ pub fn render_loop(
                         if rendered_frames.is_multiple_of(30) {
                             tracing::info!("render_loop: rendered {} frames", rendered_frames);
                         }
-                        pipeline
-                            .position_us
-                            .store((pts * 1_000_000.0) as u64, Ordering::Release);
+                        // position 报主时钟（正在听到的位置），不是上屏帧 PTS：
+                        // 视频帧可领先设备里未播完的音频最多约 1 秒，按帧 PTS 报
+                        // 会让进度条冲到声音前面
+                        pipeline.position_us.store(
+                            (pipeline.avsync.master_clock() * 1_000_000.0) as u64,
+                            Ordering::Release,
+                        );
                         let _ = output.submit(&frame);
                         pipeline.avsync.update_video_clock(pts);
                     }
@@ -221,18 +225,20 @@ pub fn render_loop(
                                 }
                                 VideoSyncDecision::Drop => {
                                     dropped_frames += 1;
-                                    pipeline
-                                        .position_us
-                                        .store((pts * 1_000_000.0) as u64, Ordering::Release);
+                                    pipeline.position_us.store(
+                                        (pipeline.avsync.master_clock() * 1_000_000.0) as u64,
+                                        Ordering::Release,
+                                    );
                                     // 跳过渲染，直接进入下一帧
                                     continue 'outer;
                                 }
                             }
                         }
                         rendered_frames += 1;
-                        pipeline
-                            .position_us
-                            .store((pts * 1_000_000.0) as u64, Ordering::Release);
+                        pipeline.position_us.store(
+                            (pipeline.avsync.master_clock() * 1_000_000.0) as u64,
+                            Ordering::Release,
+                        );
                         let _ = output.submit(&frame);
                         pipeline.avsync.update_video_clock(pts);
                     }
@@ -247,9 +253,10 @@ pub fn render_loop(
                             );
                         }
                         // 即使丢帧也更新 position，让前端进度条持续推进
-                        pipeline
-                            .position_us
-                            .store((pts * 1_000_000.0) as u64, Ordering::Release);
+                        pipeline.position_us.store(
+                            (pipeline.avsync.master_clock() * 1_000_000.0) as u64,
+                            Ordering::Release,
+                        );
                     }
                 }
             }
@@ -314,6 +321,7 @@ pub fn audio_output_loop(
     let mut device_paused = false;
     let mut align_start: Option<Instant> = None;
     let mut last_seek_gen = pipeline.seek_generation.load(Ordering::Acquire);
+    let mut last_speed_gen = pipeline.speed_generation.load(Ordering::Acquire);
     // 主时钟读数要带着它属于哪一次 seek，视频线程才能拒绝 flush 前入队的旧位置采样
     let clock = audio_output.clock();
     if let Some(clock) = &clock {
@@ -379,6 +387,15 @@ pub fn audio_output_loop(
                 clock.set_generation(current_gen);
             }
             pending = None;
+        }
+
+        // 变速：缓冲里是按旧速率重采样过的 PCM，放完它们之前新速率听不见，
+        // 主时钟也会继续按旧速率走。flush 掉旧采样（clock 随之 reset），
+        // pending 是源采样率的原始帧，留着按新速率重采样后写入
+        let current_speed_gen = pipeline.speed_generation.load(Ordering::Acquire);
+        if current_speed_gen != last_speed_gen {
+            last_speed_gen = current_speed_gen;
+            audio_output.flush();
         }
 
         // 背压：设备没空间就攥着这一帧等它，既不丢采样（丢采样会让音频一路冲到
@@ -632,7 +649,7 @@ mod tests {
         let handle = std::thread::spawn(move || render_loop(p, slot, rx, 10.0, true).unwrap());
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pipeline.position_us.load(Ordering::Acquire) != 50_000 {
+        while submitted.lock().is_empty() {
             assert!(Instant::now() < deadline, "首帧没有上屏");
             std::hint::spin_loop();
         }

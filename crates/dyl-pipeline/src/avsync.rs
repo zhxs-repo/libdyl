@@ -1,6 +1,6 @@
 use dyl_audio::{AudioClock, AudioClockObservation};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -148,6 +148,9 @@ pub struct AVSync {
     max_drift_secs: f64,
     /// 播放速率（存储为 speed×1000 的定点数；1000 = 1.0x）— 挂钟模式时缩放流逝时间
     speed: Mutex<Arc<AtomicU32>>,
+    /// 音频延迟（毫秒，正数推迟、负数提前）— 只在视频比对音频主时钟时扣除，
+    /// 不污染对外的播放位置与 EOF 判定
+    audio_delay_ms: AtomicI64,
 }
 
 /// 门控要观察的 pipeline 共享状态
@@ -176,6 +179,7 @@ impl AVSync {
             max_consecutive_drops: 5,
             max_drift_secs: 2.0,
             speed: Mutex::new(Arc::new(AtomicU32::new(1000))),
+            audio_delay_ms: AtomicI64::new(0),
         }
     }
 
@@ -204,16 +208,32 @@ impl AVSync {
         *self.audio_clock.lock() = clock;
     }
 
-    /// 设置音频延迟（毫秒）— 传播到 AudioClock，偏移主时钟读数
+    /// 设置音频延迟（毫秒）— 音画相对偏移，只影响视频同步决策：
+    /// 正数让视频多等音频一会儿，负数让视频提前。主时钟读数本身不带延迟，
+    /// 否则快照位置与 EOF 判定都会跟着漂
     pub fn set_audio_delay(&self, delay_ms: i64) {
-        if let Some(clock) = self.audio_clock.lock().as_ref() {
-            clock.set_audio_delay(delay_ms);
-        }
+        self.audio_delay_ms.store(delay_ms, Ordering::Relaxed);
     }
 
     /// 替换播放速率的共享 Arc（由 Pipeline 在 start 时注入）
     pub fn set_speed_arc(&self, speed: Arc<AtomicU32>) {
         *self.speed.lock() = speed;
+    }
+
+    /// 变速时就地重锚挂钟：先把已流逝的时间按**旧速率**结算进基准，再换新速率。
+    ///
+    /// 不重锚的话，挂钟会把变速前那段真实时间也按新速率折算 —— 1x 播了 10s
+    /// 后切 0.5x，位置会瞬间从 10s 掉回 5s。音频主时钟不需要这一步：它的
+    /// backlog 项天然按当前速率折算剩余缓冲。
+    pub fn reanchor_speed(&self, new_milli: u32) {
+        let mut state = self.state.lock();
+        let speed = self.speed.lock();
+        let old = speed.load(Ordering::Relaxed) as f64 / 1000.0;
+        if let Some(instant) = state.start_instant {
+            state.base_pts += instant.elapsed().as_secs_f64() * old;
+            state.start_instant = Some(Instant::now());
+        }
+        speed.store(new_milli, Ordering::Relaxed);
     }
 
     /// 通过六重门控的音频主时钟位置
@@ -319,7 +339,8 @@ impl AVSync {
         }
 
         let clock = match audio {
-            Some(pts) => pts,
+            // 音频延迟只在这里扣：视频比"扬声器位置 − 延迟"，音频推迟时视频多等
+            Some(pts) => pts - self.audio_delay_ms.load(Ordering::Relaxed) as f64 / 1000.0,
             None => {
                 let speed = self.speed.lock().load(Ordering::Relaxed) as f64 / 1000.0;
                 Self::wall_clock(&state, speed)
@@ -759,5 +780,77 @@ mod tests {
         clock.set_generation(1);
         clock.on_write(0, Some(60.2));
         assert!((sync.master_clock() - 60.2).abs() < 1e-9);
+    }
+
+    /// 变速瞬间：已流逝的挂钟时间按旧速率结算，之后才按新速率推进。
+    /// 不重锚就会把整段历史按新速率重算，位置瞬间回跳（0.5× 时直接减半）
+    #[test]
+    fn speed_reanchor_settles_elapsed_at_old_rate() {
+        let sync = AVSync::new();
+        let start = Instant::now();
+        sync.set_first_frame_time(0.0);
+        std::thread::sleep(Duration::from_millis(100));
+        let wall = start.elapsed().as_secs_f64();
+
+        sync.reanchor_speed(500);
+        let clock = sync.master_clock();
+        assert!(
+            clock > wall * 0.75 && clock < wall * 1.5,
+            "变速前的 {wall:.3}s 必须按 1× 结算，got {clock:.3}"
+        );
+
+        // 之后 0.5×：推进量约为挂钟流逝的一半（用实测时长比，容忍调度抖动）
+        let t0 = Instant::now();
+        std::thread::sleep(Duration::from_millis(200));
+        let wall2 = t0.elapsed().as_secs_f64();
+        let delta = sync.master_clock() - clock;
+        assert!(
+            delta > wall2 * 0.25 && delta < wall2 * 0.75,
+            "0.5× 下 {wall2:.3}s 应推进约 {:.3}s，got {delta:.3}",
+            wall2 * 0.5
+        );
+    }
+
+    /// 音频延迟只偏移"视频比对的基准"，主时钟/position 始终报扬声器事实：
+    /// EOF 判定、进度条都不该被延迟设置推着走
+    #[test]
+    fn audio_delay_shifts_video_comparison_only() {
+        let sync = AVSync::new();
+        sync.set_audio_clock(Some(audio_at(10.0)));
+        sync.set_audio_delay(500);
+        assert!(
+            (sync.master_clock() - 10.0).abs() < 1e-9,
+            "主时钟不得含音频延迟"
+        );
+
+        // 扬声器 10.0、延迟 +0.5s → 视频基准 9.5：正好对齐显示，10.0 超前等待
+        assert!(matches!(
+            sync.video_sync_decision(9.5),
+            VideoSyncDecision::Display
+        ));
+        assert!(matches!(
+            sync.video_sync_decision(10.0),
+            VideoSyncDecision::Wait(_)
+        ));
+
+        // 负延迟（音频提前）：视频基准 10.5，10.0 的帧落后 → Drop
+        sync.set_audio_delay(-500);
+        assert!((sync.master_clock() - 10.0).abs() < 1e-9);
+        assert!(matches!(
+            sync.video_sync_decision(10.0),
+            VideoSyncDecision::Drop
+        ));
+    }
+
+    /// 无音频轨（挂钟模式）时延迟不参与：没有可对齐的音频，画面照常推进
+    #[test]
+    fn wall_clock_ignores_audio_delay() {
+        let sync = AVSync::new();
+        sync.set_first_frame_time(0.0);
+        sync.set_audio_delay(500);
+        assert!(matches!(
+            sync.video_sync_decision(0.0),
+            VideoSyncDecision::Display
+        ));
     }
 }

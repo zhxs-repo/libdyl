@@ -154,14 +154,15 @@ pub fn demux_loop(
                 .position_us
                 .store((actual * 1_000_000.0) as u64, Ordering::Release);
             pipeline.avsync.reset(actual);
-            // 最后递增 seek_generation：下游按 generation 丢弃 seek 之前入队的残留
-            // 数据，解码线程同时据此触发 decoder.flush()。这里的 Release 与消费端的
-            // Acquire 构成同步链 —— 看到新 generation 就必然看到上面已发布的三个值
-            let generation = pipeline.seek_generation.fetch_add(1, Ordering::Release) + 1;
-            // seek 之后还要继续读到目标位置之后的数据，EOF 标记不能沿用
+            // seek 之后还要继续读到目标位置之后的数据，EOF 标记不能沿用；
+            // 与裁剪值/position 一样先于 generation 发布，保持同一条发布纪律
             if seek_result.is_ok() {
                 pipeline.demux_complete.store(false, Ordering::Release);
             }
+            // 最后递增 seek_generation：下游按 generation 丢弃 seek 之前入队的残留
+            // 数据，解码线程同时据此触发 decoder.flush()。这里的 Release 与消费端的
+            // Acquire 构成同步链 —— 看到新 generation 就必然看到上面已发布的值
+            let generation = pipeline.seek_generation.fetch_add(1, Ordering::Release) + 1;
             // 每条被接受的 seek 命令都必须有唯一结局，引擎据此完成 command_completed；
             // tag 原样带回，便于引擎识别已被更新请求覆盖的旧结局
             match seek_result {
