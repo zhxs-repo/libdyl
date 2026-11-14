@@ -18,6 +18,10 @@ struct Args {
     subtitle: Option<PathBuf>,
     danmaku: Option<PathBuf>,
     autoplay: bool,
+    /// 开启 FSR 1.0 上采样（EASU + RCAS）
+    upscale_fsr: bool,
+    /// HDR→SDR 时内容峰值落到的亮度（nit，相对 SDR 白 100）
+    hdr_peak_nits: f32,
 }
 
 fn main() -> ExitCode {
@@ -50,6 +54,8 @@ fn main() -> ExitCode {
         subtitle: args.subtitle,
         danmaku: args.danmaku,
         autoplay: args.autoplay,
+        upscale_fsr: args.upscale_fsr,
+        hdr_peak_nits: args.hdr_peak_nits,
     };
     let mut app = match app::App::new(startup, proxy) {
         Ok(app) => app,
@@ -81,6 +87,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         subtitle: None,
         danmaku: None,
         autoplay: true,
+        upscale_fsr: false,
+        hdr_peak_nits: 85.0,
     };
     let mut args = args.peekable();
 
@@ -88,6 +96,21 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         match arg.as_str() {
             "--help" | "-h" => return Ok(None),
             "--no-play" => parsed.autoplay = false,
+            "--upscale" => {
+                let value = expect_value(&mut args, "--upscale")?;
+                parsed.upscale_fsr = match value.as_str() {
+                    "fsr1" => true,
+                    "off" | "none" => false,
+                    other => return Err(format!("--upscale 只接受 fsr1 / off，收到 {other}")),
+                };
+            }
+            "--hdr-peak" => {
+                let value = expect_value(&mut args, "--hdr-peak")?;
+                let nits: f32 = value
+                    .parse()
+                    .map_err(|_| format!("--hdr-peak 需要一个数字（nit），收到 {value}"))?;
+                parsed.hdr_peak_nits = nits;
+            }
             "--subtitle" => {
                 parsed.subtitle = Some(PathBuf::from(expect_value(&mut args, "--subtitle")?));
             }
@@ -122,6 +145,8 @@ fn print_usage() {
            --subtitle <路径>   加载外挂字幕 (SRT/ASS/SSA)\n\
            --danmaku <路径>    加载 B 站 XML 弹幕\n\
            --no-play           加载完成后不自动播放\n\
+           --upscale fsr1|off  上采样器（fsr1 = EASU + RCAS，默认 off）\n\
+           --hdr-peak <nit>    PQ 内容峰值落到的电平（默认 85，100 = 顶到白）\n\
            -h, --help          显示帮助\n\
          \n\
          窗口快捷键: 空格 播放/暂停 · ←/→ 快退/快进 5s · F 全屏 · M 静音 · H 帮助 · Esc 退出"

@@ -37,22 +37,32 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 @group(0) @binding(1) var uv_texture: texture_2d<f32>;
 @group(0) @binding(2) var yuv_sampler: sampler;
 
-/// 色彩参数 — 与 Rust 侧 ColorParams 的 16 字节布局一致
+/// 色彩参数 — 与 Rust 侧 `ColorParams` 的 32 字节布局一致
 struct ColorParams {
     matrix: u32,     // 0 = BT.601, 1 = BT.709, 2 = BT.2020
     full_range: u32, // 非 0 = full range(0..255)，否则 limited(16..235)
     transfer: u32,   // 0 = SDR（gamma 直通）, 1 = PQ（ST 2084）
     primaries: u32,  // 0 = 其它/未标注, 2 = BT.2020（PQ 路径下做 2020→709）
+    /// 内容峰值映射到显示端的电平（nit，相对 SDR 白；默认 85 = 留 15% 余量）
+    dst_peak_nits: f32,
+    /// 无静态元数据时假定的内容峰值（默认 1000）
+    src_peak_nits: f32,
+    _pad0: f32,
+    _pad1: f32,
 };
 
 @group(0) @binding(3) var<uniform> color: ColorParams;
 
-// HDR→SDR 的假设：没有静态元数据时按 1000 nit 内容峰值、100 nit SDR 目标。
-// 常量为 PQ 编码值（PQ(nits / 10000)），取 BT.2390 附录的 10-bit 代表值
-const SRC_PEAK_PQ: f32 = 0.7518271;
-const DST_PEAK_PQ: f32 = 0.5080784;
-// 膝点：以下恒等，以上用 Hermite 压到目标峰值
-const KNEE_PQ: f32 = 1.5 * DST_PEAK_PQ - 0.5 * SRC_PEAK_PQ;
+/// SDR 白的线性亮度：100 nit / 10000，即归一化的固定基准。
+///
+/// 它必须是常量。早先把 `dst_peak_nits` 同时当作"压缩终点"和"归一化点"，
+/// 于是 scale ∝ 1/pq_eotf(dst_peak)：调高目标峰值反而让整幅画变暗，
+/// 且内容峰值恒被顶到 255 —— 300 nit 以上全部挤在最后几个码值里，
+/// 高光糊成一片。归一化与压缩终点必须分开。
+const SDR_WHITE_LINEAR: f32 = 0.01;
+
+// HDR→SDR：没有静态元数据时按 `src_peak_nits` 的内容峰值，用 BT.2390 EETF
+// 压到 `dst_peak_nits` 的显示电平，再按 SDR 白归一。
 
 /// BT.709 OETF — 线性光 → 显示编码值
 fn oetf_709(l: f32) -> f32 {
@@ -74,20 +84,33 @@ fn pq_eotf(e: f32) -> f32 {
     return pow(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1);
 }
 
+/// PQ OETF（ST 2084）单通道 — 绝对亮度(0..1 = 0..10000 nit) → 编码值
+fn pq_oetf(l: f32) -> f32 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let p = pow(clamp(l, 0.0, 1.0), m1);
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+}
+
 /// BT.2390 EETF — PQ 域亮度压缩
-fn eetf(e: f32) -> f32 {
-    if (e <= KNEE_PQ) {
+///
+/// `knee` 以下恒等，以上用三次 Hermite 压到 `dst_peak`：起点值与斜率承接
+/// 线性段（C1 连续），终点值为目标峰值、斜率为 0。
+fn eetf(e: f32, src_peak: f32, dst_peak: f32) -> f32 {
+    let knee = 1.5 * dst_peak - 0.5 * src_peak;
+    if (e <= knee) {
         return e;
     }
-    let t = clamp((e - KNEE_PQ) / (SRC_PEAK_PQ - KNEE_PQ), 0.0, 1.0);
+    let t = clamp((e - knee) / (src_peak - knee), 0.0, 1.0);
     let t2 = t * t;
     let t3 = t2 * t;
-    // 三次 Hermite：起点值 = 膝点、起点斜率 = 1（与线性段 C1 连续）、
-    // 终点值 = 目标峰值、终点斜率 = 0
-    let p = (2.0 * t3 - 3.0 * t2 + 1.0) * KNEE_PQ
-        + (t3 - 2.0 * t2 + t) * (SRC_PEAK_PQ - KNEE_PQ)
-        + (-2.0 * t3 + 3.0 * t2) * DST_PEAK_PQ;
-    return min(p, DST_PEAK_PQ);
+    let p = (2.0 * t3 - 3.0 * t2 + 1.0) * knee
+        + (t3 - 2.0 * t2 + t) * (src_peak - knee)
+        + (-2.0 * t3 + 3.0 * t2) * dst_peak;
+    return min(p, dst_peak);
 }
 
 /// BT.2020 → BT.709 线性色域转换（BT.2087 系数，列主序）
@@ -116,10 +139,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let kr = kk.x;
     let kb = kk.y;
 
-    // limited range 的 Y 占 16..235、色度占 ±112，先还原到满量程再套矩阵
+    // limited range 的 Y 占 16..235、色度占 16..240，先还原到满量程再套矩阵。
+    //
+    // 色度的中性点是 **128/255**，不是 0.5。用 0.5 会让每个像素带上约 +0.4%
+    // 的偏置：中性灰被推亮约 4 个码值，暗部还会微微偏蓝。
     let yy = (y - select(16.0 / 255.0, 0.0, full)) * select(255.0 / 219.0, 1.0, full);
-    let cb = (uv.r - 0.5) * select(255.0 / 224.0, 1.0, full);
-    let cr = (uv.g - 0.5) * select(255.0 / 224.0, 1.0, full);
+    let neutral = select(128.0 / 255.0, 0.5, full);
+    let cb = (uv.r - neutral) * select(255.0 / 224.0, 1.0, full);
+    let cr = (uv.g - neutral) * select(255.0 / 224.0, 1.0, full);
 
     let denom = 1.0 - kr - kb;
     var r = yy + 2.0 * (1.0 - kr) * cr;
@@ -136,14 +163,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // HDR10（PQ）：r/g/b 仍是 PQ 编码值
+    let src_peak = pq_oetf(color.src_peak_nits / 10000.0);
+    let dst_peak = pq_oetf(color.dst_peak_nits / 10000.0);
     let max_pq = max(r, max(g, b));
     let linear = vec3<f32>(pq_eotf(r), pq_eotf(g), pq_eotf(b));
     let max_linear = max(linear.r, max(linear.g, linear.b));
-    // 亮度压缩系数：EETF 后的峰值 / 原峰值，再按 100 nit SDR 目标归一。
+    // 亮度压缩系数：EETF 后的峰值 / 原峰值，再按固定的 SDR 白归一。
+    // 归一化点不随 `dst_peak_nits` 变，所以调高它只会更亮，不会反向。
     // 全黑帧没有峰值可压，系数取任意值即可（乘 0 仍是 0）
     var scale = 1.0;
     if (max_linear > 0.0) {
-        scale = pq_eotf(eetf(max_pq)) / max_linear / pq_eotf(DST_PEAK_PQ);
+        scale = pq_eotf(eetf(max_pq, src_peak, dst_peak)) / max_linear / SDR_WHITE_LINEAR;
     }
     var mapped = linear * scale;
     if (color.primaries == 2u) {

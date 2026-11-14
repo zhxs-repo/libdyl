@@ -29,6 +29,8 @@ impl GpuContext {
         window: Arc<Window>,
         handles: HostOutputHandles,
         overlays: OverlayHandles,
+        upscale_fsr: bool,
+        hdr_peak_nits: f32,
     ) -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -115,6 +117,17 @@ impl GpuContext {
             Box::new(SharedOverlay::new(overlays.subtitle)),
             Box::new(SharedOverlay::new(overlays.danmaku)),
         ]);
+        // 渲染策略：上采样与 HDR 目标峰值都在建管线时一次性下发
+        if upscale_fsr {
+            compositor.set_upscale(dyl_render::UpscaleConfig {
+                upscaler: dyl_render::Upscaler::Fsr1,
+                ..Default::default()
+            });
+        }
+        compositor.set_hdr_target(dyl_render::HdrTarget {
+            dst_peak_nits: hdr_peak_nits,
+            ..Default::default()
+        });
 
         let egui_ctx = egui::Context::default();
         crate::ui::install_cjk_font(&egui_ctx);

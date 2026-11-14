@@ -37,6 +37,10 @@ pub struct Startup {
     pub subtitle: Option<PathBuf>,
     pub danmaku: Option<PathBuf>,
     pub autoplay: bool,
+    /// 开启 FSR 1.0 上采样（EASU + RCAS）
+    pub upscale_fsr: bool,
+    /// HDR→SDR 的目标峰值亮度（nit）
+    pub hdr_peak_nits: f32,
 }
 
 /// pipeline 线程 → shell 主线程的有界帧队列。
@@ -82,6 +86,9 @@ pub struct App {
     egui_wake: Option<Instant>,
     /// 本构建是否实测可用硬件解码；为假时 shell 不摆解码菜单（`auto` 会被同步拒绝）
     hw_decode: bool,
+    /// 上采样开关与 HDR 目标峰值：启动时由命令行给定，建 GPU 时一次性下发
+    upscale_fsr: bool,
+    hdr_peak_nits: f32,
 }
 
 const ENGINE_POLL: Duration = Duration::from_millis(100);
@@ -105,6 +112,8 @@ impl App {
 
         Ok(Self {
             autoplay: startup.autoplay,
+            upscale_fsr: startup.upscale_fsr,
+            hdr_peak_nits: startup.hdr_peak_nits,
             pending_subtitle: startup.subtitle.take(),
             pending_danmaku: startup.danmaku.take(),
             startup: Some(startup),
@@ -330,6 +339,8 @@ impl ApplicationHandler<UserEvent> for App {
             window.clone(),
             engine.host_output_handles(),
             engine.overlay_handles(),
+            self.upscale_fsr,
+            self.hdr_peak_nits,
         ) {
             Ok(gpu) => gpu,
             Err(error) => {

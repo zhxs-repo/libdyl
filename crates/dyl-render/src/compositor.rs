@@ -17,7 +17,9 @@ use wgpu;
 use crate::clock::OverlayClock;
 use crate::overlay::{Overlay, OverlayArea, OverlayFrame, OverlayStack};
 use crate::video_output::{OutputStats, OutputStatsSnapshot};
-use crate::yuv_pipeline::{color_params_bytes, interleave_uv_planes, setup_yuv_pipeline};
+use crate::yuv_pipeline::{
+    color_params_bytes, interleave_uv_planes, setup_yuv_pipeline, HdrTarget,
+};
 
 /// pending 帧队列深度：一个节拍只用一帧，多余的帧保最新
 pub const FRAME_QUEUE_CAPACITY: usize = 2;
@@ -103,6 +105,11 @@ pub struct FrameCompositor {
     last_pts: f64,
     /// 内容变化（加载字幕/弹幕等）强制重绘一次
     invalidated: bool,
+    /// FSR 1.0 上采样阶段（默认关闭）
+    fsr: crate::upscale::FsrStage,
+    upscale: crate::upscale::UpscaleConfig,
+    /// HDR→SDR 映射参数（默认 1000 nit 内容峰值 → 85 nit 电平）
+    hdr: HdrTarget,
 }
 
 impl FrameCompositor {
@@ -137,7 +144,51 @@ impl FrameCompositor {
             gpu_epoch: crate::overlay::next_gpu_epoch(),
             last_pts: 0.0,
             invalidated: false,
+            fsr: crate::upscale::FsrStage::new(device, surface_format),
+            upscale: crate::upscale::UpscaleConfig::default(),
+            hdr: HdrTarget::default(),
         }
+    }
+
+    /// HDR 映射参数：内容峰值（默认 1000 nit）压到 `dst_peak_nits` 电平
+    /// （默认 85，即留 15% 高光余量；100 = 顶到 SDR 白，高光会被裁掉）。
+    ///
+    /// 归一化基准固定是 SDR 白 100 nit，所以调高 `dst_peak_nits` 一定更亮。
+    /// 只在 PQ 帧上起作用；SDR 帧的取值不影响任何像素。改完立即重写
+    /// 色彩 uniform，暂停状态下也会按新参数重绘一次。
+    pub fn set_hdr_target(&mut self, hdr: HdrTarget) {
+        let hdr = hdr.sanitized();
+        if hdr != self.hdr {
+            self.hdr = hdr;
+            if let Some(frame) = self.last_frame.as_ref() {
+                self.queue.write_buffer(
+                    &self.color_params,
+                    0,
+                    &color_params_bytes(frame, self.hdr),
+                );
+            }
+            self.invalidated = true;
+        }
+    }
+
+    pub fn hdr_target(&self) -> HdrTarget {
+        self.hdr
+    }
+
+    /// 设置上采样策略（默认 `Upscaler::Off`：保持原有单趟双线性）。
+    ///
+    /// 只在显示矩形明显大于视频尺寸时生效；切到 `Fsr1` 后下一帧就会走
+    /// EASU + RCAS 三趟链，切回 `Off` 则立即回到单趟路径。
+    pub fn set_upscale(&mut self, cfg: crate::upscale::UpscaleConfig) {
+        let cfg = cfg.sanitized();
+        if cfg != self.upscale {
+            self.upscale = cfg;
+            self.invalidated = true;
+        }
+    }
+
+    pub fn upscale(&self) -> crate::upscale::UpscaleConfig {
+        self.upscale
     }
 
     pub fn set_overlays(&mut self, overlays: Vec<Box<dyn Overlay>>) {
@@ -287,7 +338,7 @@ impl FrameCompositor {
 
         // 矩阵系数与量程每帧更新：写错是画质错误而不是抖动
         self.queue
-            .write_buffer(&self.color_params, 0, &color_params_bytes(frame));
+            .write_buffer(&self.color_params, 0, &color_params_bytes(frame, self.hdr));
 
         if let Some(y_plane) = frame.planes.first() {
             let (y_data, y_pitch) = aligned_rows(
@@ -394,7 +445,27 @@ impl FrameCompositor {
         area: OverlayArea,
         pts: f64,
     ) {
-        {
+        let rect = area.video_rect;
+        // 放大到 1.15 倍以上才值得多跑两趟全屏 pass；1:1 与缩小仍走原路径
+        let upscale = self.upscale.upscaler != crate::upscale::Upscaler::Off
+            && crate::upscale::should_upscale(
+                (self.video_width, self.video_height),
+                (rect.2 as u32, rect.3 as u32),
+            );
+
+        if upscale && self.video_width > 0 && self.video_height > 0 {
+            self.fsr.render(
+                &self.device,
+                &self.queue,
+                encoder,
+                view,
+                &self.render_pipeline,
+                &self.bind_group,
+                (self.video_width, self.video_height),
+                rect,
+                self.upscale.rcas_stops,
+            );
+        } else {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("compositor_video_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -410,7 +481,7 @@ impl FrameCompositor {
                 ..Default::default()
             });
             if self.video_width > 0 && self.video_height > 0 {
-                let (x, y, w, h) = area.video_rect;
+                let (x, y, w, h) = rect;
                 pass.set_pipeline(&self.render_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_viewport(x, y, w, h, 0.0, 1.0);
