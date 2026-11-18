@@ -14,7 +14,7 @@ mod overlays;
 mod state;
 
 pub use dyl_ffmpeg::VideoFrame;
-pub use engine::Engine;
+pub use engine::{ControlDiag, Engine};
 pub use error::EngineError;
 pub use output::{HostFrameSink, HostOutputHandles};
 pub use overlays::OverlayHandles;

@@ -8,7 +8,7 @@ pub mod pipeline;
 pub mod seek;
 pub mod subtitle;
 
-pub use avsync::{AVSync, VideoSyncDecision};
+pub use avsync::{AVSync, AvsyncDiag, VideoSyncDecision};
 pub use event::{PipelineEvent, PipelineEventMsg};
-pub use pipeline::Pipeline;
+pub use pipeline::{Pipeline, PipelineDiag};
 pub use seek::Stamped;

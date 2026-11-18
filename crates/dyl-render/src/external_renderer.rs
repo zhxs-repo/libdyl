@@ -385,7 +385,7 @@ impl ExtRenderState {
 // 线程入口：帧/命令/ready 三个通道 + 初始句柄 + 四份与提交线程共享的原子状态
 #[allow(clippy::too_many_arguments)]
 fn ext_render_loop(
-    frame_rx: mpsc::Receiver<VideoFrame>,
+    frame_rx: mpsc::Receiver<Arc<VideoFrame>>,
     ctrl_rx: mpsc::Receiver<ExtCmd>,
     ready_tx: mpsc::Sender<std::result::Result<(), String>>,
     initial_handle: SurfaceHandle,
@@ -541,7 +541,7 @@ pub struct ExternalRenderer {
     width: u32,
     height: u32,
     /// 视频帧通道（bounded，满时丢帧做背压）
-    frame_tx: Option<mpsc::SyncSender<VideoFrame>>,
+    frame_tx: Option<mpsc::SyncSender<Arc<VideoFrame>>>,
     /// 控制通道（unbounded：detach/reattach 必须能立即入队，不被帧背压阻塞）
     ctrl_tx: Option<mpsc::Sender<ExtCmd>>,
     /// 渲染线程句柄，drop 时 join 以确保 Surface 在自身销毁前被释放
@@ -590,7 +590,7 @@ impl ExternalRenderer {
         self.width = handle.width;
         self.height = handle.height;
 
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<VideoFrame>(4);
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<VideoFrame>>(4);
         let (ctrl_tx, ctrl_rx) = mpsc::channel::<ExtCmd>();
         let (ready_tx, ready_rx) = mpsc::channel();
         let surface_attached = Arc::clone(&self.surface_attached);
@@ -638,12 +638,10 @@ impl Default for ExternalRenderer {
 }
 
 impl VideoOutput for ExternalRenderer {
-    fn submit_frame(&mut self, frame: &VideoFrame) -> Result<()> {
+    fn submit_frame(&mut self, frame: &Arc<VideoFrame>) -> Result<()> {
         if !self.initialized || !self.surface_attached.load(Ordering::Acquire) {
             return Ok(());
         }
-        // ADR-14：帧尺寸必须整张落进设备纹理。在这里就报错，pipeline 才能把它当
-        // 呈现失败上报；留到渲染线程只会变成无声丢帧或 wgpu 建纹理失败
         if let Some(err) = frame_size_error(
             frame.width,
             frame.height,
@@ -651,12 +649,11 @@ impl VideoOutput for ExternalRenderer {
         ) {
             return Err(err);
         }
-        // 以本帧 PTS 重新锚定叠加层挂钟（无时间戳帧不覆盖，避免时钟被重置为 0）
         if let Some(secs) = frame.pts_secs() {
             self.overlay_clock.reanchor(secs);
         }
         if let Some(tx) = &self.frame_tx {
-            match tx.try_send(frame.clone()) {
+            match tx.try_send(Arc::clone(frame)) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
                     self.stats.record_dropped();
@@ -910,6 +907,6 @@ mod tests {
             time_base: dyl_ffmpeg::time_base(1, 90000),
         };
         // 未初始化时 submit_frame 应静默返回 Ok
-        assert!(r.submit_frame(&frame).is_ok());
+        assert!(r.submit_frame(&Arc::new(frame)).is_ok());
     }
 }

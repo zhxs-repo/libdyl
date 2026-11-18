@@ -410,6 +410,35 @@ impl AVSync {
     pub fn video_clock(&self) -> f64 {
         self.state.lock().video_clock
     }
+
+    /// AVSync 诊断快照 — 供调试工具（MCP inspect）读取内部状态
+    pub fn inspect(&self) -> AvsyncDiag {
+        let audio_master = self.audio_clock.lock().is_some();
+        let mut state = self.state.lock();
+        let speed = self.speed.lock().load(Ordering::Relaxed) as f64 / 1000.0;
+        let master_clock = self
+            .gated_audio(&mut state)
+            .unwrap_or_else(|| Self::wall_clock(&state, speed));
+        AvsyncDiag {
+            master_clock,
+            video_clock: state.video_clock,
+            consecutive_drops: state.consecutive_drops,
+            floor_pts: state.floor_pts,
+            last_reject: state.last_reject.map(|r| format!("{r:?}")),
+            audio_master,
+        }
+    }
+}
+
+/// AVSync 内部诊断快照
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AvsyncDiag {
+    pub master_clock: f64,
+    pub video_clock: f64,
+    pub consecutive_drops: u32,
+    pub floor_pts: f64,
+    pub last_reject: Option<String>,
+    pub audio_master: bool,
 }
 
 impl Default for AVSync {

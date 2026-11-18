@@ -89,7 +89,7 @@ fn is_pre_roll_audio(frame: &dyl_ffmpeg::AudioFrame, target: f64) -> bool {
 pub fn render_loop(
     pipeline: Arc<Pipeline>,
     output: Arc<OutputSlot>,
-    video_frame_rx: crossbeam_channel::Receiver<Stamped<dyl_ffmpeg::VideoFrame>>,
+    video_frame_rx: crossbeam_channel::Receiver<Stamped<Arc<dyl_ffmpeg::VideoFrame>>>,
     duration_secs: f64,
     has_video: bool,
 ) -> dyl_core::Result<()> {
@@ -571,7 +571,7 @@ mod tests {
     }
 
     impl dyl_render::VideoOutput for RecordingOutput {
-        fn submit_frame(&mut self, frame: &dyl_ffmpeg::VideoFrame) -> dyl_core::Result<()> {
+        fn submit_frame(&mut self, frame: &Arc<dyl_ffmpeg::VideoFrame>) -> dyl_core::Result<()> {
             self.submitted.lock().push(frame.pts_secs().unwrap_or(-1.0));
             Ok(())
         }
@@ -608,16 +608,20 @@ mod tests {
         let slot = OutputSlot::new(Box::new(RecordingOutput {
             submitted: submitted.clone(),
         }));
-        let (tx, rx) = bounded::<Stamped<dyl_ffmpeg::VideoFrame>>(8);
+        let (tx, rx) = bounded::<Stamped<Arc<dyl_ffmpeg::VideoFrame>>>(8);
 
         pipeline.seek_target_us.store(2_000_000, Ordering::Release);
         pipeline.avsync.reset(2.0);
         pipeline.seek_generation.store(1, Ordering::Release);
 
-        tx.send(Stamped::new(0, video_frame(9.0))).unwrap();
-        tx.send(Stamped::new(1, video_frame(0.4))).unwrap();
-        tx.send(Stamped::new(1, video_frame(1.99))).unwrap();
-        tx.send(Stamped::new(1, video_frame(2.0))).unwrap();
+        tx.send(Stamped::new(0, Arc::new(video_frame(9.0))))
+            .unwrap();
+        tx.send(Stamped::new(1, Arc::new(video_frame(0.4))))
+            .unwrap();
+        tx.send(Stamped::new(1, Arc::new(video_frame(1.99))))
+            .unwrap();
+        tx.send(Stamped::new(1, Arc::new(video_frame(2.0))))
+            .unwrap();
         drop(tx);
 
         render_loop(Arc::new(pipeline), slot, rx, 10.0, true).unwrap();
@@ -638,12 +642,14 @@ mod tests {
         let slot = OutputSlot::new(Box::new(RecordingOutput {
             submitted: submitted.clone(),
         }));
-        let (tx, rx) = bounded::<Stamped<dyl_ffmpeg::VideoFrame>>(8);
+        let (tx, rx) = bounded::<Stamped<Arc<dyl_ffmpeg::VideoFrame>>>(8);
 
         // 首帧立即上屏（惰性锚定），第二帧超前挂钟 150ms → 进入 Wait（每次最多 50ms、
         // 最多 3 次），这段就是 seek 可以插进来的窗口
-        tx.send(Stamped::new(0, video_frame(0.05))).unwrap();
-        tx.send(Stamped::new(0, video_frame(0.2))).unwrap();
+        tx.send(Stamped::new(0, Arc::new(video_frame(0.05))))
+            .unwrap();
+        tx.send(Stamped::new(0, Arc::new(video_frame(0.2))))
+            .unwrap();
 
         let p = pipeline.clone();
         let handle = std::thread::spawn(move || render_loop(p, slot, rx, 10.0, true).unwrap());
@@ -663,7 +669,8 @@ mod tests {
         pipeline.avsync.reset(5.0);
         pipeline.seek_generation.store(1, Ordering::Release);
 
-        tx.send(Stamped::new(1, video_frame(5.0))).unwrap();
+        tx.send(Stamped::new(1, Arc::new(video_frame(5.0))))
+            .unwrap();
         drop(tx);
         handle.join().unwrap();
 

@@ -49,6 +49,10 @@ pub(crate) enum ControlMsg {
         event: Option<Event>,
         ack: Option<Sender<()>>,
     },
+    /// 诊断探针：控制线程填充 `ControlDiag` 后通过 responder 返回
+    Inspect {
+        responder: Sender<ControlDiag>,
+    },
     Shutdown,
 }
 
@@ -477,6 +481,43 @@ impl Engine {
             tracing::warn!("surface change: control thread did not publish within 5s");
         }
     }
+
+    /// 诊断探针：向控制线程请求 `ControlDiag`，带 2s 超时兜底
+    pub fn inspect(&self) -> Result<ControlDiag, EngineError> {
+        if self.shared.shutting_down.load(Ordering::Acquire) {
+            return Err(EngineError::invalid_state("engine is shutting down"));
+        }
+        let (tx, rx) = bounded(1);
+        self.shared
+            .control_tx
+            .try_send(ControlMsg::Inspect { responder: tx })
+            .map_err(|_| EngineError::invalid_state("engine control channel is full or gone"))?;
+        rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            EngineError::new(
+                ErrorCode::Timeout,
+                "inspect: control thread did not respond within 2s",
+            )
+        })
+    }
+}
+
+/// 控制线程内部诊断快照 — 供调试工具（MCP inspect）读取
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ControlDiag {
+    pub state: PlayerState,
+    pub session: u64,
+    pub load_generation: u64,
+    pub has_pending_load: bool,
+    pub has_pending_restart: bool,
+    pub has_pending_seek: bool,
+    pub has_pending_switch: bool,
+    pub pending_seek_tag: Option<u64>,
+    pub pending_seek_to_ms: Option<u64>,
+    pub superseded_seeks_len: usize,
+    pub ab_seek_tag: Option<u64>,
+    pub has_pipeline: bool,
+    pub pipeline: Option<dyl_pipeline::PipelineDiag>,
+    pub avsync: Option<dyl_pipeline::AvsyncDiag>,
 }
 
 impl Drop for Engine {

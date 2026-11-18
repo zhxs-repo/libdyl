@@ -20,6 +20,10 @@ pub trait VideoDecoder: Send {
     /// 刷新解码器（seek 后调用）
     fn flush(&mut self);
 
+    /// seek pre-roll 期间跳过非参考帧（B帧）的解码，加速 seek 响应。
+    /// `true` = 设置 AVDISCARD_NONREF，`false` = 恢复 AVDISCARD_DEFAULT。
+    fn set_skip_nonref(&mut self, _skip: bool) {}
+
     /// 本次解码当前实际使用的硬件设备名；运行中回退软解后变 `None`
     fn hardware_device(&self) -> Option<String> {
         None
@@ -601,6 +605,16 @@ impl VideoDecoder for FfmpegVideoDecoder {
         }
         // seek 造成的卡顿不该和旧窗口累计到一起
         self.fallback.reset_window();
+    }
+
+    fn set_skip_nonref(&mut self, skip: bool) {
+        if let Some(dec) = self.decoder.as_mut() {
+            dec.skip_frame(if skip {
+                ffmpeg_next::Discard::NonReference
+            } else {
+                ffmpeg_next::Discard::Default
+            });
+        }
     }
 
     fn hardware_device(&self) -> Option<String> {

@@ -20,7 +20,7 @@ struct Sink {
 }
 
 impl HostFrameSink for Sink {
-    fn push_frame(&self, frame: VideoFrame) {
+    fn push_frame(&self, frame: Arc<VideoFrame>) {
         let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         let planes = frame
             .planes

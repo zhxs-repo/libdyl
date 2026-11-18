@@ -8,6 +8,7 @@
 //! `cargo run -p dyl-ffmpeg --example hwaccel_probe`。
 
 use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
 
@@ -21,6 +22,78 @@ use ffmpeg_next::frame::Video;
 
 /// 硬解开关的环境变量名，取值见 [`Policy::parse`]，缺省为关。
 pub const HW_DECODE_ENV: &str = "DYL_HW_DECODE";
+
+/// 手动指定 DXGI adapter 索引的环境变量名（仅 Windows）。
+/// 设置后跳过自动 GPU 选择，直接用该 adapter 创建硬解设备。
+/// 值为 adapter 索引数字，如 `0`（集显）或 `1`（独显）。
+pub const HW_ADAPTER_ENV: &str = "DYL_HW_ADAPTER";
+
+/// DXGI adapter 信息——用于区分独显与集显，决定 d3d12va 是否安全使用
+#[derive(Debug, Clone)]
+pub struct AdapterInfo {
+    pub index: u32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub description: String,
+    /// 独显 = vendor 非 Intel（0x8086）。NVIDIA=0x10DE, AMD=0x1002
+    pub is_discrete: bool,
+}
+
+/// 枚举系统 DXGI adapters。Windows 专用；其他平台返回空 Vec。
+pub fn enumerate_adapters() -> Vec<AdapterInfo> {
+    #[cfg(target_os = "windows")]
+    {
+        enumerate_adapters_dxgi()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_adapters_dxgi() -> Vec<AdapterInfo> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        tracing::warn!("hwaccel: CreateDXGIFactory1 失败，无法枚举 GPU adapter");
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut index = 0u32;
+    loop {
+        match unsafe { factory.EnumAdapters1(index) } {
+            Ok(adapter) => {
+                if let Ok(desc) = unsafe { adapter.GetDesc1() } {
+                    let vendor_id = desc.VendorId;
+                    let is_discrete = vendor_id != 0x8086;
+                    let description = String::from_utf16_lossy(&desc.Description)
+                        .trim_end_matches('\0')
+                        .to_string();
+                    tracing::info!(
+                        "hwaccel: DXGI adapter {} = {} ({:04x}:{:04x}) {}",
+                        index,
+                        description,
+                        vendor_id,
+                        desc.DeviceId,
+                        if is_discrete { "独显" } else { "集显" }
+                    );
+                    result.push(AdapterInfo {
+                        index,
+                        vendor_id,
+                        device_id: desc.DeviceId,
+                        description,
+                        is_discrete,
+                    });
+                }
+                index += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    result
+}
 
 /// 本内核认得的设备名。两个名字表外：
 /// - `mediacodec`：它的 `hwcontext_mediacodec` 既没实现 `transfer_data` 也没实现
@@ -41,7 +114,8 @@ const DEVICE_NAMES: &[&CStr] = &[
 ];
 
 /// `Policy::Auto` 的平台首选顺序。依据是探针报告的可建性与回传成熟度：
-/// Windows 上 d3d11va 的回传路径最成熟，dxva2 连帧约束都查不出来（本机返回 NULL）。
+/// Windows 上 d3d11va 的回传路径最成熟，d3d12va 在 Intel UHD 630 等较旧 GPU 上
+/// 高负载时可能触发 DPC_WATCHDOG_VIOLATION 蓝屏，作为第二候选。
 #[cfg(target_os = "windows")]
 const PREFERRED: &[&CStr] = &[c"d3d11va", c"d3d12va", c"dxva2"];
 #[cfg(target_os = "macos")]
@@ -110,23 +184,30 @@ pub struct HwDevice {
 unsafe impl Send for HwDevice {}
 
 impl HwDevice {
-    /// 打开该类型的默认设备。探针实测：建不出来就是这台机器/驱动没有，换下一个，
-    /// 不要重试（方案 5.3：一次会话内不反复试硬件）。
-    fn open(device_type: AVHWDeviceType) -> Option<Self> {
+    /// 打开该类型的设备。`adapter_index` 为 `Some(n)` 时通过 FFmpeg 的 `device`
+    /// 参数指定 DXGI adapter 索引（仅 D3D11VA/D3D12VA 有效）。
+    /// 探针实测：建不出来就是这台机器/驱动没有，换下一个，不要重试（方案 5.3）。
+    fn open(device_type: AVHWDeviceType, adapter_index: Option<i32>) -> Option<Self> {
         let mut buffer: *mut ffi::AVBufferRef = std::ptr::null_mut();
+        let device_cstr = adapter_index.map(|i| CString::new(i.to_string()).unwrap());
+        let device_ptr = device_cstr
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null());
         let code = unsafe {
             ffi::av_hwdevice_ctx_create(
                 &mut buffer,
                 device_type,
-                std::ptr::null(),
+                device_ptr,
                 std::ptr::null_mut(),
                 0,
             )
         };
         if code < 0 || buffer.is_null() {
             tracing::debug!(
-                "hwaccel: {} 建不出设备上下文 {}",
+                "hwaccel: {} 建不出设备上下文 (adapter={:?}) {}",
                 type_name(device_type),
+                adapter_index,
                 strerror(code)
             );
             return None;
@@ -220,11 +301,24 @@ pub fn select(codec: AVCodecID, policy: Policy) -> Option<HwPlan> {
     if codec_ptr.is_null() {
         return None;
     }
-    for device_type in device_types {
+
+    let forced_adapter = std::env::var(HW_ADAPTER_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    if forced_adapter.is_some() {
+        tracing::info!(
+            "hwaccel: {HW_ADAPTER_ENV}={}，手动指定 DXGI adapter",
+            forced_adapter.unwrap()
+        );
+    }
+    let adapters = enumerate_adapters();
+    let candidates = build_candidates(&device_types, &adapters, forced_adapter);
+
+    for (device_type, adapter_index) in candidates {
         let Some((hw_format, explicit)) = hardware_config(codec_ptr, device_type) else {
             continue;
         };
-        let Some(device) = HwDevice::open(device_type) else {
+        let Some(device) = HwDevice::open(device_type, adapter_index) else {
             continue;
         };
         let plan = HwPlan {
@@ -241,6 +335,53 @@ pub fn select(codec: AVCodecID, policy: Policy) -> Option<HwPlan> {
         codec_name(codec)
     );
     None
+}
+
+/// 构建 `(device_type, adapter_index)` 候选列表。
+///
+/// 优先级：
+/// 1. `forced_adapter` 手动指定 adapter → 按 `device_types` 顺序尝试该 adapter
+/// 2. 独显（NVIDIA/AMD）上：所有设备类型（含 d3d12va）
+/// 3. 集显（Intel）上：跳过 d3d12va（高负载下可能触发 DPC_WATCHDOG_VIOLATION 蓝屏）
+/// 4. 无 DXGI 信息（非 Windows 或枚举失败）：退回默认 adapter
+fn build_candidates(
+    device_types: &[AVHWDeviceType],
+    adapters: &[AdapterInfo],
+    forced_adapter: Option<i32>,
+) -> Vec<(AVHWDeviceType, Option<i32>)> {
+    if let Some(idx) = forced_adapter {
+        return device_types.iter().map(|&dt| (dt, Some(idx))).collect();
+    }
+
+    if adapters.is_empty() {
+        return device_types.iter().map(|&dt| (dt, None)).collect();
+    }
+
+    let mut candidates = Vec::new();
+
+    // 独显优先：对所有设备类型（含 d3d12va）
+    for &dt in device_types {
+        for adapter in adapters.iter().filter(|a| a.is_discrete) {
+            candidates.push((dt, Some(adapter.index as i32)));
+        }
+    }
+
+    // 集显：跳过 d3d12va
+    for &dt in device_types {
+        if dt == AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA {
+            tracing::debug!("hwaccel: 集显跳过 d3d12va（Intel 集显高负载下可能触发蓝屏）");
+            continue;
+        }
+        for adapter in adapters.iter().filter(|a| !a.is_discrete) {
+            candidates.push((dt, Some(adapter.index as i32)));
+        }
+    }
+
+    if candidates.is_empty() {
+        device_types.iter().map(|&dt| (dt, None)).collect()
+    } else {
+        candidates
+    }
 }
 
 /// 把方案装进解码上下文。
@@ -982,5 +1123,106 @@ mod tests {
             "描述里有空段: {text}"
         );
         assert_ne!(plan.cpu_format(), Pixel::None, "{text}");
+    }
+
+    /// `build_candidates`：独显优先，集显跳过 d3d12va
+    #[test]
+    fn build_candidates_discrete_first_and_integrated_skips_d3d12va() {
+        use ffmpeg_next::ffi::AVHWDeviceType::*;
+
+        let device_types = vec![AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_D3D12VA];
+        let adapters = vec![
+            AdapterInfo {
+                index: 0,
+                vendor_id: 0x8086,
+                device_id: 0x3e9b,
+                description: "Intel UHD 630".into(),
+                is_discrete: false,
+            },
+            AdapterInfo {
+                index: 1,
+                vendor_id: 0x10de,
+                device_id: 0x1c8c,
+                description: "NVIDIA GTX 1050 Ti".into(),
+                is_discrete: true,
+            },
+        ];
+
+        let candidates = build_candidates(&device_types, &adapters, None);
+
+        // 独显优先：d3d11va on NVIDIA, d3d12va on NVIDIA
+        assert_eq!(candidates[0], (AV_HWDEVICE_TYPE_D3D11VA, Some(1)));
+        assert_eq!(candidates[1], (AV_HWDEVICE_TYPE_D3D12VA, Some(1)));
+        // 集显：只有 d3d11va（跳过 d3d12va）
+        assert_eq!(candidates[2], (AV_HWDEVICE_TYPE_D3D11VA, Some(0)));
+        // 不应出现集显的 d3d12va
+        assert!(
+            !candidates
+                .iter()
+                .any(|(dt, adapter)| *dt == AV_HWDEVICE_TYPE_D3D12VA && *adapter == Some(0)),
+            "集显不应出现 d3d12va"
+        );
+    }
+
+    /// `build_candidates`：`forced_adapter` 覆盖自动选择
+    #[test]
+    fn build_candidates_forced_adapter_overrides() {
+        use ffmpeg_next::ffi::AVHWDeviceType::*;
+
+        let device_types = vec![AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_D3D12VA];
+        let adapters = vec![
+            AdapterInfo {
+                index: 0,
+                vendor_id: 0x8086,
+                device_id: 0x3e9b,
+                description: "Intel UHD 630".into(),
+                is_discrete: false,
+            },
+            AdapterInfo {
+                index: 1,
+                vendor_id: 0x10de,
+                device_id: 0x1c8c,
+                description: "NVIDIA GTX 1050 Ti".into(),
+                is_discrete: true,
+            },
+        ];
+
+        let candidates = build_candidates(&device_types, &adapters, Some(0));
+        // 强制 adapter 0：按 device_types 顺序，不跳过 d3d12va
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (AV_HWDEVICE_TYPE_D3D11VA, Some(0)));
+        assert_eq!(candidates[1], (AV_HWDEVICE_TYPE_D3D12VA, Some(0)));
+    }
+
+    /// `build_candidates`：无 adapter 信息时退回默认（None）
+    #[test]
+    fn build_candidates_no_adapters_falls_back_to_default() {
+        use ffmpeg_next::ffi::AVHWDeviceType::*;
+
+        let device_types = vec![AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_D3D12VA];
+        let candidates = build_candidates(&device_types, &[], None);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (AV_HWDEVICE_TYPE_D3D11VA, None));
+        assert_eq!(candidates[1], (AV_HWDEVICE_TYPE_D3D12VA, None));
+    }
+
+    /// `build_candidates`：只有集显时跳过 d3d12va
+    #[test]
+    fn build_candidates_only_integrated_skips_d3d12va() {
+        use ffmpeg_next::ffi::AVHWDeviceType::*;
+
+        let device_types = vec![AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_D3D12VA];
+        let adapters = vec![AdapterInfo {
+            index: 0,
+            vendor_id: 0x8086,
+            device_id: 0x3e9b,
+            description: "Intel UHD 630".into(),
+            is_discrete: false,
+        }];
+
+        let candidates = build_candidates(&device_types, &adapters, None);
+        // 只有集显的 d3d11va，d3d12va 被跳过
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], (AV_HWDEVICE_TYPE_D3D11VA, Some(0)));
     }
 }

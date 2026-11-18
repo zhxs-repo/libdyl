@@ -3,6 +3,7 @@
 //! 覆盖同步校验（形状/范围/静态能力）、异步状态拒绝、快照默认值、
 //! 事件信封顺序与 command_completed 的唯一性。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
@@ -343,7 +344,7 @@ fn invalid_surface_handles_are_rejected() {
 struct SilentSink;
 
 impl HostFrameSink for SilentSink {
-    fn push_frame(&self, _frame: VideoFrame) {}
+    fn push_frame(&self, _frame: Arc<VideoFrame>) {}
 
     fn request_redraw(&self) {}
 }

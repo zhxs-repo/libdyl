@@ -305,7 +305,7 @@ impl Pipeline {
         // 无需排空通道也无法把旧位置的画面/声音播出来
         let (video_pkt_tx, video_pkt_rx) = bounded::<Stamped<dyl_ffmpeg::Packet>>(512);
         let (audio_pkt_tx, audio_pkt_rx) = bounded::<Stamped<dyl_ffmpeg::Packet>>(1024);
-        let (video_frame_tx, video_frame_rx) = bounded::<Stamped<dyl_ffmpeg::VideoFrame>>(32);
+        let (video_frame_tx, video_frame_rx) = bounded::<Stamped<Arc<dyl_ffmpeg::VideoFrame>>>(32);
         let (audio_frame_tx, audio_frame_rx) = bounded::<Stamped<dyl_ffmpeg::AudioFrame>>(64);
 
         // 字幕 packet channel（仅在有内嵌字幕时创建）
@@ -556,6 +556,35 @@ impl Pipeline {
             message,
         });
     }
+
+    /// Pipeline 内部诊断快照 — 供调试工具（MCP inspect）读取
+    pub fn inspect(&self) -> PipelineDiag {
+        PipelineDiag {
+            seek_generation: self.seek_generation.load(Ordering::Acquire),
+            demux_progress: self.demux_progress.load(Ordering::Acquire),
+            first_frame_ready: self.first_frame_ready.load(Ordering::Acquire),
+            ended: self.ended.load(Ordering::Acquire),
+            demux_complete: self.demux_complete.load(Ordering::Acquire),
+            speed: self.speed.load(Ordering::Relaxed) as f64 / 1000.0,
+            speed_generation: self.speed_generation.load(Ordering::Acquire),
+            decode_device: self.decode_device.lock().clone(),
+            session: self.session,
+        }
+    }
+}
+
+/// Pipeline 内部诊断快照
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PipelineDiag {
+    pub seek_generation: u64,
+    pub demux_progress: u64,
+    pub first_frame_ready: bool,
+    pub ended: bool,
+    pub demux_complete: bool,
+    pub speed: f64,
+    pub speed_generation: u64,
+    pub decode_device: Option<String>,
+    pub session: u64,
 }
 
 impl Drop for Pipeline {

@@ -19,9 +19,7 @@ use crate::overlays::OverlayEngines;
 /// 只允许持有有界队列的发送端或唤醒回调，**不得持有 GPU 资源**：
 /// engine 线程可能在任意时刻 drop sink，GPU 资源必须在 shell 主线程释放。
 pub trait HostFrameSink: Send + Sync {
-    /// 非阻塞投递；队列满时由实现丢最旧帧
-    fn push_frame(&self, frame: VideoFrame);
-    /// 唤醒 shell 主循环重绘
+    fn push_frame(&self, frame: Arc<VideoFrame>);
     fn request_redraw(&self);
 }
 
@@ -53,12 +51,11 @@ impl HostVideoOutput {
 }
 
 impl VideoOutput for HostVideoOutput {
-    fn submit_frame(&mut self, frame: &VideoFrame) -> DylResult<()> {
-        // 锚定由输出层负责：shell 收到帧后只入 compositor 队列，不重复 reanchor
+    fn submit_frame(&mut self, frame: &Arc<VideoFrame>) -> DylResult<()> {
         if let Some(secs) = frame.pts_secs() {
             self.overlay_clock.reanchor(secs);
         }
-        self.sink.push_frame(frame.clone());
+        self.sink.push_frame(Arc::clone(frame));
         self.sink.request_redraw();
         Ok(())
     }
@@ -236,12 +233,12 @@ mod tests {
 
     #[derive(Default)]
     struct TestSink {
-        frames: Mutex<Vec<VideoFrame>>,
+        frames: Mutex<Vec<Arc<VideoFrame>>>,
         redraws: AtomicUsize,
     }
 
     impl HostFrameSink for TestSink {
-        fn push_frame(&self, frame: VideoFrame) {
+        fn push_frame(&self, frame: Arc<VideoFrame>) {
             self.frames.lock().push(frame);
         }
 
@@ -274,7 +271,7 @@ mod tests {
         let stats = Arc::new(OutputStats::new());
         let mut output = HostVideoOutput::new(sink.clone(), clock.clone(), stats.clone());
 
-        output.submit_frame(&frame(1_234)).unwrap();
+        output.submit_frame(&Arc::new(frame(1_234))).unwrap();
         assert_eq!(sink.frames.lock().len(), 1);
         assert_eq!(sink.redraws.load(Ordering::Relaxed), 1);
         assert!(clock.is_live());
@@ -301,7 +298,7 @@ mod tests {
         let mut no_pts = frame(0);
         no_pts.pts = None;
 
-        output.submit_frame(&no_pts).unwrap();
+        output.submit_frame(&Arc::new(no_pts)).unwrap();
         assert!(!clock.is_live());
         assert_eq!(clock.now_pts(), 0.0);
     }

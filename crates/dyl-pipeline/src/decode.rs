@@ -133,7 +133,7 @@ pub fn video_decode_loop(
     pipeline: Arc<Pipeline>,
     mut decoder: Box<dyn VideoDecoder>,
     video_pkt_rx: Receiver<Stamped<Packet>>,
-    video_frame_tx: Sender<Stamped<VideoFrame>>,
+    video_frame_tx: Sender<Stamped<Arc<VideoFrame>>>,
 ) -> dyl_core::Result<()> {
     tracing::info!("video_decode_loop started");
 
@@ -168,6 +168,11 @@ pub fn video_decode_loop(
         if seek_gen != last_seek_gen {
             last_seek_gen = seek_gen;
             decoder.flush();
+            // pre-roll 阶段：跳过非参考帧（B帧）的解码，加速 seek 响应。
+            // 到达目标位置后由下方 receive_frame 恢复 AVDISCARD_DEFAULT。
+            if pipeline.seek_target_secs() > 0.0 {
+                decoder.set_skip_nonref(true);
+            }
             tracing::debug!("video decoder flushed (seek_gen={})", seek_gen);
         }
 
@@ -188,11 +193,22 @@ pub fn video_decode_loop(
                 loop {
                     match decoder.receive_frame() {
                         Ok(Some(frame)) => {
+                            // pre-roll 结束：帧 PTS 已到达 seek 目标，恢复完整解码
+                            let target = pipeline.seek_target_secs();
+                            if target > 0.0 {
+                                if let Some(pts) = frame.pts {
+                                    let pts_secs = pts as f64 * frame.time_base.numerator() as f64
+                                        / frame.time_base.denominator() as f64;
+                                    if pts_secs + 0.001 >= target {
+                                        decoder.set_skip_nonref(false);
+                                    }
+                                }
+                            }
                             frame_count += 1;
                             if frame_count.is_multiple_of(50) {
                                 tracing::info!("video_decode: decoded {} frames", frame_count);
                             }
-                            let stamped = Stamped::new(gen_now, frame);
+                            let stamped = Stamped::new(gen_now, Arc::new(frame));
                             match handoff(
                                 &pipeline,
                                 &video_frame_tx,
@@ -249,7 +265,7 @@ pub fn video_decode_loop(
                 gen,
                 "video",
                 DRAIN_TIMEOUT,
-                || decoder.receive_frame(),
+                || decoder.receive_frame().map(|opt| opt.map(Arc::new)),
             );
         }
     }

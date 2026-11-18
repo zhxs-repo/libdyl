@@ -45,7 +45,7 @@ pub fn frame_size_error(width: u32, height: u32, max_dimension: u32) -> Option<D
 }
 
 struct FrameQueue {
-    frames: VecDeque<VideoFrame>,
+    frames: VecDeque<Arc<VideoFrame>>,
 }
 
 impl FrameQueue {
@@ -56,7 +56,7 @@ impl FrameQueue {
     }
 
     /// 队列满时丢最旧的一帧，返回是否发生了丢弃
-    fn push(&mut self, frame: VideoFrame) -> bool {
+    fn push(&mut self, frame: Arc<VideoFrame>) -> bool {
         let dropped = if self.frames.len() == FRAME_QUEUE_CAPACITY {
             self.frames.pop_front();
             true
@@ -67,7 +67,7 @@ impl FrameQueue {
         dropped
     }
 
-    fn pop(&mut self) -> Option<VideoFrame> {
+    fn pop(&mut self) -> Option<Arc<VideoFrame>> {
         self.frames.pop_front()
     }
 
@@ -95,7 +95,7 @@ pub struct FrameCompositor {
     display_width: u32,
     display_height: u32,
     pending_frames: FrameQueue,
-    last_frame: Option<VideoFrame>,
+    last_frame: Option<Arc<VideoFrame>>,
     overlay_stack: OverlayStack,
     overlay_clock: Arc<OverlayClock>,
     stats: Arc<OutputStats>,
@@ -203,7 +203,7 @@ impl FrameCompositor {
     ///
     /// 超过设备纹理上限的帧直接拒绝：宁可报错，也不建一张建不出来的纹理，
     /// 也不把画面悄悄缩放（ADR-14）
-    pub fn enqueue_frame(&mut self, frame: VideoFrame) -> Result<()> {
+    pub fn enqueue_frame(&mut self, frame: Arc<VideoFrame>) -> Result<()> {
         if let Some(err) = frame_size_error(
             frame.width,
             frame.height,
@@ -307,7 +307,7 @@ impl FrameCompositor {
         self.invalidated = false;
     }
 
-    fn upload_frame(&mut self, frame: &VideoFrame) {
+    fn upload_frame(&mut self, frame: &Arc<VideoFrame>) {
         if frame.width != self.video_width || frame.height != self.video_height {
             self.video_width = frame.width;
             self.video_height = frame.height;
@@ -585,9 +585,9 @@ mod tests {
     #[test]
     fn frame_queue_keeps_newest_and_counts_overflow() {
         let mut queue = FrameQueue::new();
-        assert!(!queue.push(frame(Some(1))));
-        assert!(!queue.push(frame(Some(2))));
-        assert!(queue.push(frame(Some(3))));
+        assert!(!queue.push(Arc::new(frame(Some(1)))));
+        assert!(!queue.push(Arc::new(frame(Some(2)))));
+        assert!(queue.push(Arc::new(frame(Some(3)))));
         assert_eq!(queue.len(), FRAME_QUEUE_CAPACITY);
         assert_eq!(queue.pop().and_then(|f| f.pts), Some(2));
         assert_eq!(queue.pop().and_then(|f| f.pts), Some(3));

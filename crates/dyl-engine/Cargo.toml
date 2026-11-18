@@ -13,5 +13,6 @@ dyl-subtitle = { path = "../dyl-subtitle" }
 dyl-danmaku = { path = "../dyl-danmaku" }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

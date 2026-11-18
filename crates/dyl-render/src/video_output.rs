@@ -151,7 +151,7 @@ impl SurfaceHandle {
 /// 只负责配置、提交、统计与生命周期；窗口、事件循环、标题栏都归 shell。
 pub trait VideoOutput: Send {
     /// 提交一帧；实现自行决定排队/上屏节拍。
-    fn submit_frame(&mut self, frame: &VideoFrame) -> Result<()>;
+    fn submit_frame(&mut self, frame: &Arc<VideoFrame>) -> Result<()>;
 
     /// 宿主窗口尺寸变化。
     fn resize(&mut self, width: u32, height: u32) -> Result<()>;
@@ -201,7 +201,7 @@ impl NullOutput {
 }
 
 impl VideoOutput for NullOutput {
-    fn submit_frame(&mut self, _frame: &VideoFrame) -> Result<()> {
+    fn submit_frame(&mut self, _frame: &Arc<VideoFrame>) -> Result<()> {
         self.dropped_frames += 1;
         Ok(())
     }
@@ -237,7 +237,7 @@ impl OutputSlot {
         Self::new(Box::new(NullOutput::new()))
     }
 
-    pub fn submit(&self, frame: &VideoFrame) -> Result<()> {
+    pub fn submit(&self, frame: &Arc<VideoFrame>) -> Result<()> {
         self.output.lock().submit_frame(frame)
     }
 
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn null_output_drops_frames_and_counts_them() {
-        let f = frame();
+        let f = Arc::new(frame());
         let mut out = NullOutput::new();
         for _ in 0..3 {
             out.submit_frame(&f).unwrap();
@@ -314,12 +314,12 @@ mod tests {
     #[test]
     fn slot_replaces_output_atomically() {
         let slot = OutputSlot::null();
-        slot.submit(&frame()).unwrap();
+        slot.submit(&Arc::new(frame())).unwrap();
         assert_eq!(slot.stats().dropped_frames, 1);
 
         let old = slot.replace(Box::new(NullOutput::new()));
         assert_eq!(old.stats().dropped_frames, 1);
-        slot.submit(&frame()).unwrap();
+        slot.submit(&Arc::new(frame())).unwrap();
         assert_eq!(slot.stats().dropped_frames, 1);
     }
 

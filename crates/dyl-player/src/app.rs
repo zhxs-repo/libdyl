@@ -47,13 +47,13 @@ pub struct Startup {
 ///
 /// 只搬运 CPU 帧，不持有任何 GPU 资源；满时丢最旧帧并计入共享统计。
 struct ShellSink {
-    frames: Arc<Mutex<VecDeque<VideoFrame>>>,
+    frames: Arc<Mutex<VecDeque<Arc<VideoFrame>>>>,
     proxy: EventLoopProxy<UserEvent>,
     stats: Arc<OutputStats>,
 }
 
 impl HostFrameSink for ShellSink {
-    fn push_frame(&self, frame: VideoFrame) {
+    fn push_frame(&self, frame: Arc<VideoFrame>) {
         let mut frames = self.frames.lock();
         if frames.len() >= FRAME_QUEUE_CAPACITY {
             frames.pop_front();
@@ -70,7 +70,7 @@ impl HostFrameSink for ShellSink {
 pub struct App {
     engine: Option<Engine>,
     events: Receiver<EventEnvelope>,
-    frames: Arc<Mutex<VecDeque<VideoFrame>>>,
+    frames: Arc<Mutex<VecDeque<Arc<VideoFrame>>>>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
     ui: UiState,

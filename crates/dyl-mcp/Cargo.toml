@@ -1,0 +1,22 @@
+[package]
+name = "dyl-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server for Dyl playback kernel debugging"
+
+[dependencies]
+dyl-core = { path = "../dyl-core" }
+dyl-engine = { path = "../dyl-engine" }
+
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rmcp = { version = "0.3", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "macros"] }
+
+[[bin]]
+name = "dyl-mcp"
+path = "src/bin/dyl_mcp.rs"

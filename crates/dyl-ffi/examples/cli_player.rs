@@ -261,6 +261,16 @@ impl PlayerApp {
             }
             self.hud.last_frames = frames;
             self.hud.last_update = now;
+            println!(
+                "[stats] state={:?} pos={}ms rendered={} dropped={} rfps={:.1} decode={:?} device={:?}",
+                snapshot.state,
+                snapshot.position_ms,
+                snapshot.stats.rendered_frames,
+                snapshot.stats.dropped_frames,
+                self.hud.rfps,
+                snapshot.decode.backend,
+                snapshot.decode.device,
+            );
         }
 
         let media = snapshot

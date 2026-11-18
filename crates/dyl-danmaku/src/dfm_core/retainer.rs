@@ -87,6 +87,8 @@ struct TrackData {
     /// crowding scans from the back and stops at the cutoff.
     recent: VecDeque<TrackEntry>,
     last_compact_ms: i64,
+    /// Reused crowding-map buffer — avoids a heap allocation per scroll entry.
+    thick_buf: Vec<f32>,
 }
 
 impl TrackData {
@@ -95,6 +97,7 @@ impl TrackData {
             tracks: Vec::new(),
             recent: VecDeque::new(),
             last_compact_ms: i64::MIN,
+            thick_buf: Vec::new(),
         }
     }
 
@@ -124,6 +127,7 @@ impl TrackData {
         self.tracks.clear();
         self.recent.clear();
         self.last_compact_ms = i64::MIN;
+        self.thick_buf.clear();
     }
 }
 
@@ -316,7 +320,7 @@ pub fn row_span_for(paint_height: f32, track_gap_ratio: f32, total_rows: usize) 
 /// away (see `OLD_ENTRY_CUTOFF_MS`) to keep prepare time bounded during
 /// sustained danmaku bursts. Only affects already-overloaded screens where
 /// every placement is a soft overlap anyway; normal loads stay exact.
-const ACTIVE_BUDGET: usize = 512;
+const ACTIVE_BUDGET: usize = 128;
 
 /// During bursts, ignore entries that departed more than this long ago: they
 /// are close to leaving the screen, so their collision weight is small and
@@ -351,19 +355,20 @@ fn select_scroll_track(
         return Some((sta, Vec::new()));
     }
 
-    let thick = build_scroll_crowding(new_entry, new_span, &track_data.recent, sta_max, view_width);
+    let thick = build_scroll_crowding(
+        new_entry,
+        new_span,
+        &track_data.recent,
+        sta_max,
+        view_width,
+        &mut track_data.thick_buf,
+    );
 
-    // First-fit: the first candidate row with zero crowding. Keeps the
-    // sparse-time behaviour identical to the old first-non-colliding-track
-    // engine.
     if let Some(sta) = thick.iter().position(|&crowding| crowding == 0.0) {
         place_recent(track_data, new_entry, sta, new_span);
         return Some((sta, Vec::new()));
     }
 
-    // Self-sent danmaku claims the top band unconditionally, displacing
-    // whatever occupies it. Deliberate product rule; the only way a placed
-    // entry loses its slot.
     if is_me && total_rows > 0 {
         let mut displaced: DisplacedIndices = Vec::new();
         for existing in track_data.recent.iter() {
@@ -380,8 +385,6 @@ fn select_scroll_track(
         return Some((0, displaced));
     }
 
-    // Overload: soft-overlap at the least crowded row instead of dropping or
-    // clearing whole bands.
     if allow_scroll_overwrite {
         let best = thick
             .iter()
@@ -493,14 +496,17 @@ fn fixed_rows_free(
 /// the candidate row); only the vertical overlap varies per row. `recent` is in
 /// departure order, so the scan runs newest-first and can stop at the burst
 /// cutoff.
-fn build_scroll_crowding(
+fn build_scroll_crowding<'a>(
     new_entry: &TrackEntry,
     new_span: usize,
     recent: &VecDeque<TrackEntry>,
     sta_max: usize,
     view_width: f32,
-) -> Vec<f32> {
-    let mut thick = vec![0.0f32; sta_max + 1];
+    thick_buf: &'a mut Vec<f32>,
+) -> &'a [f32] {
+    thick_buf.clear();
+    thick_buf.resize(sta_max + 1, 0.0);
+    let thick = thick_buf.as_mut_slice();
     let new_end = new_entry.time_ms + new_entry.duration_ms;
 
     // Burst mode: on a sustained-overload screen (a danmaku wall), entries
@@ -542,7 +548,7 @@ fn build_scroll_crowding(
             }
         }
     }
-    thick
+    thick_buf.as_slice()
 }
 
 // ---------------------------------------------------------------------------

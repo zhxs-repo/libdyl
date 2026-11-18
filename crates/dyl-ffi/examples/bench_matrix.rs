@@ -148,7 +148,7 @@ impl Sink {
 }
 
 impl HostFrameSink for Sink {
-    fn push_frame(&self, frame: VideoFrame) {
+    fn push_frame(&self, frame: Arc<VideoFrame>) {
         self.count.fetch_add(1, Ordering::Relaxed);
         if let Some(secs) = frame.pts_secs() {
             let mut marks = self.marks.lock();

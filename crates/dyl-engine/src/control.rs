@@ -18,7 +18,7 @@ use dyl_ffmpeg::TrackSelection;
 use dyl_pipeline::pipeline::SeekRequest;
 use dyl_pipeline::{Pipeline, PipelineEvent, PipelineEventMsg};
 
-use crate::engine::{ControlMsg, EngineShared, OverlayOutcome};
+use crate::engine::{ControlDiag, ControlMsg, EngineShared, OverlayOutcome};
 use crate::error::EngineError;
 use crate::events::EventBus;
 use crate::load::{spawn as spawn_load, LoadJob, LoadOutcome, LoadPurpose};
@@ -186,6 +186,10 @@ impl ControlState {
                 if let Some(ack) = ack {
                     let _ = ack.send(());
                 }
+            }
+            ControlMsg::Inspect { responder } => {
+                let diag = self.build_diag();
+                let _ = responder.send(diag);
             }
             ControlMsg::Shutdown => {}
         }
@@ -1160,6 +1164,29 @@ impl ControlState {
         self.flush_superseded();
         self.retire_current_pipeline();
         self.publish();
+    }
+
+    fn build_diag(&self) -> ControlDiag {
+        let (pipeline_diag, avsync_diag) = match &self.pipeline {
+            Some(p) => (Some(p.inspect()), Some(p.avsync.inspect())),
+            None => (None, None),
+        };
+        ControlDiag {
+            state: self.state,
+            session: self.session,
+            load_generation: self.load_generation,
+            has_pending_load: self.pending_load.is_some(),
+            has_pending_restart: self.pending_restart.is_some(),
+            has_pending_seek: self.pending_seek.is_some(),
+            has_pending_switch: self.pending_switch.is_some(),
+            pending_seek_tag: self.pending_seek.as_ref().map(|s| s.tag),
+            pending_seek_to_ms: self.pending_seek.as_ref().map(|s| s.to_ms),
+            superseded_seeks_len: self.superseded_seeks.len(),
+            ab_seek_tag: self.ab_seek_tag,
+            has_pipeline: self.pipeline.is_some(),
+            pipeline: pipeline_diag,
+            avsync: avsync_diag,
+        }
     }
 
     fn on_tick(&mut self) {

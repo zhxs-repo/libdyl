@@ -239,6 +239,22 @@ fn main() {
         println!("{}", probe_device(device_type));
     }
 
+    println!("\n=== DXGI Adapter 枚举（GPU 选择逻辑）===");
+    for adapter in dyl_ffmpeg::hwaccel::enumerate_adapters() {
+        println!(
+            "adapter {} = {} ({:04x}:{:04x}) {}",
+            adapter.index,
+            adapter.description,
+            adapter.vendor_id,
+            adapter.device_id,
+            if adapter.is_discrete {
+                "独显"
+            } else {
+                "集显"
+            }
+        );
+    }
+
     println!("\n=== 解码器的 hwaccel 配置 ===");
     let codecs: Vec<(ffi::AVCodecID, &str)> = vec![
         (ffi::AVCodecID::AV_CODEC_ID_H264, "h264"),
